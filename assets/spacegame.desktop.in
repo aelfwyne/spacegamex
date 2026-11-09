@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FTL Drift
+GenericName=Space Survival Game
+Comment=Keep one ship alive in an infinite, procedurally generated galaxy
+Exec=@BIN@
+Icon=spacegame
+Terminal=false
+Categories=Game;Simulation;
+Keywords=space;survival;ftl;sim;
+StartupWMClass=spacegame

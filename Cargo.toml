@@ -1,0 +1,31 @@
+[package]
+name = "spacegame"
+version = "0.2.0"
+edition = "2024"
+description = "FTL Drift — a spaceship survival sim"
+default-run = "spacegame"
+
+[lib]
+name = "spacegame"
+path = "src/lib.rs"
+
+# Windowed game (eframe/egui: Wayland + X11 on Linux, Win32 on Windows).
+[[bin]]
+name = "spacegame"
+path = "src/bin/spacegame.rs"
+
+# Headless balance simulator (console tool, used by the regression sweep).
+[[bin]]
+name = "spacegame-sim"
+path = "src/bin/spacegame-sim.rs"
+
+[dependencies]
+directories = "6.0.0"
+eframe = "0.37.0"
+rand = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[profile.dev.package."*"]
+# egui is slow unoptimised; keep our own crate debuggable.
+opt-level = 2
