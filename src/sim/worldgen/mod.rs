@@ -21,6 +21,7 @@ pub mod stars;
 pub mod terrain;
 
 use super::civ::{base_price, Civ, CivKind, CivTier, T2_STOCK};
+use super::opts::GalaxyOpts;
 use super::planet::{
     planet_name, Atmo, AtmoKind, BeltFeature, ColonyTech, Deposit, GgFeature, Host, LifeType, NativeTech,
     Planet, PlanetClass, Salvage, TempBand,
@@ -36,7 +37,7 @@ use rand::rngs::StdRng;
 use rand::RngExt;
 use std::collections::BTreeMap;
 
-pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool) -> StarSystem {
+pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool, opts: &GalaxyOpts) -> StarSystem {
     let mut rng = derive(seed, id.wrapping_add(0x5eed_b10c));
     let (star, mods) = if is_home {
         (stars::build_star(&mut rng, StarClass::G, StarKind::MainSequence, 2, Some(1.0)), stars::Mods { ice: -1, ..Default::default() })
@@ -121,11 +122,11 @@ pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool) -> StarSystem 
     }
 
     if !is_home {
-        populate(&mut rng, &mut protos);
+        populate(&mut rng, &mut protos, opts);
     }
 
     // ---- into game bodies ----
-    let mut planets: Vec<Planet> = protos.iter().map(|b| finalize(&mut rng, b, &star, companion.as_ref().map(|c| &c.0))).collect();
+    let mut planets: Vec<Planet> = protos.iter().map(|b| finalize(&mut rng, b, &star, companion.as_ref().map(|c| &c.0), opts)).collect();
     if is_home {
         curate_home(&mut planets, &star);
     }
@@ -185,11 +186,11 @@ fn all_paths(protos: &[Proto]) -> Vec<(usize, Option<usize>)> {
 }
 
 /// Colony, life, sentients, societies and salvage.
-fn populate(rng: &mut StdRng, protos: &mut [Proto]) {
+fn populate(rng: &mut StdRng, protos: &mut [Proto], opts: &GalaxyOpts) {
     let paths = all_paths(protos);
 
     // ---- colony (first: Colony-Altered life depends on it) ----
-    if percent(rng, colony::COLONY_CHANCE) {
+    if percent(rng, colony::COLONY_CHANCE * opts.colony_mult()) {
         let cands: Vec<((usize, Option<usize>), f64)> = paths
             .iter()
             .filter_map(|&p| {
@@ -258,11 +259,11 @@ fn populate(rng: &mut StdRng, protos: &mut [Proto]) {
         return;
     };
     let mut count = match body_mut(protos, origin).life {
-        Some(l) => life::roll_sentients(rng, l),
+        Some(l) => life::roll_sentients(rng, l, opts.sentient_mult()),
         None => 0,
     };
     if count > 0 {
-        let tech = weighted(rng, &life::tech_weights(false));
+        let tech = weighted(rng, &life::tech_weights(false, opts.advanced_tech_mult()));
         if tech == NativeTech::ExtinctRuins {
             let b = body_mut(protos, origin);
             if b.life.is_none() {
@@ -285,7 +286,7 @@ fn populate(rng: &mut StdRng, protos: &mut [Proto]) {
                 if !free.is_empty() && percent(rng, ch) {
                     let p = free[life::pick_index(rng, free.len())];
                     taken.push(p);
-                    elsewhere.push((p, weighted(rng, &life::tech_weights(true))));
+                    elsewhere.push((p, weighted(rng, &life::tech_weights(true, opts.advanced_tech_mult()))));
                 }
             }
             count -= elsewhere.len() as u8;
@@ -378,7 +379,7 @@ fn host_star<'a>(host: Host, a: &'a Star, c: Option<&'a Companion>) -> &'a Star 
     }
 }
 
-fn finalize(rng: &mut StdRng, b: &Proto, a: &Star, comp: Option<&Companion>) -> Planet {
+fn finalize(rng: &mut StdRng, b: &Proto, a: &Star, comp: Option<&Companion>, opts: &GalaxyOpts) -> Planet {
     let s = host_star(b.host, a, comp);
     let (lum, mass) = match (b.host, comp) {
         (Host::AB, Some(c)) => (a.lum + c.star.lum, a.mass + c.star.mass),
@@ -434,8 +435,8 @@ fn finalize(rng: &mut StdRng, b: &Proto, a: &Star, comp: Option<&Companion>) -> 
         _ => "iron core / silicate mantle",
     }
     .to_string();
-    let deposits = deposits(rng, b, class);
-    let satellites: Vec<Planet> = b.moons.iter().map(|m| finalize(rng, m, a, comp)).collect();
+    let deposits = deposits(rng, b, class, opts);
+    let satellites: Vec<Planet> = b.moons.iter().map(|m| finalize(rng, m, a, comp, opts)).collect();
     Planet {
         name: b.name.clone(),
         class,
@@ -514,10 +515,14 @@ fn size_factor(km: f64) -> f64 {
 
 /// Mineable deposits (tons). Magnitudes follow the game's long-standing
 /// balance; what a world holds now follows from what it is.
-fn deposits(rng: &mut StdRng, b: &Proto, class: PlanetClass) -> Vec<Deposit> {
+fn deposits(rng: &mut StdRng, b: &Proto, class: PlanetClass, opts: &GalaxyOpts) -> Vec<Deposit> {
     use tune::*;
+    // The resources option scales how often optional deposits appear and
+    // how big every deposit is.
+    let (cm, tm) = (opts.deposit_chance_mult(), opts.deposit_tons_mult());
+    let percent = |rng: &mut StdRng, p: f64| percent(rng, (p * cm).min(95.0));
     let mut d: BTreeMap<Res, f64> = BTreeMap::new();
-    let mut add = |r: Res, t: f64| *d.entry(r).or_insert(0.0) += t;
+    let mut add = |r: Res, t: f64| *d.entry(r).or_insert(0.0) += t * tm;
     match class {
         PlanetClass::Terrestrial | PlanetClass::SuperEarth => {
             let s = size_factor(b.size_km) * if class == PlanetClass::SuperEarth { 4.0 } else { 1.0 };
@@ -795,7 +800,11 @@ mod tests {
     use crate::sim::planet::Geosphere;
 
     fn sample(seed: u64, r: i64) -> Vec<StarSystem> {
-        let mut gal = Galaxy::new(seed);
+        sample_with(seed, r, GalaxyOpts::default())
+    }
+
+    fn sample_with(seed: u64, r: i64, opts: GalaxyOpts) -> Vec<StarSystem> {
+        let mut gal = Galaxy::with_opts(seed, opts);
         let mut out = Vec::new();
         for cx in -r..r {
             for cy in -r..r {
@@ -907,6 +916,89 @@ mod tests {
             let s = gal.system(gal.home_id()).clone();
             assert!(s.civ.is_none() && s.companion.is_none());
             assert!(s.planets.iter().any(|p| p.class == PlanetClass::GasGiant));
+            assert!(s.planets.iter().any(|p| p.class == PlanetClass::IceGiant
+                && p.deposits.iter().any(|d| d.res == Res::Nitrogen && d.tons >= 60_000.0)));
+        }
+    }
+
+    fn opts(resources: crate::sim::Abundance, civs: crate::sim::Abundance) -> GalaxyOpts {
+        GalaxyOpts { resources, civs, ..GalaxyOpts::default() }
+    }
+
+    /// Percent of systems with any civ, and with a trading (T2/T3) one.
+    fn civ_rates(systems: &[StarSystem]) -> (f64, f64) {
+        let n = systems.len() as f64;
+        let any = systems.iter().filter(|s| s.civ.is_some()).count() as f64 / n * 100.0;
+        let trade = systems.iter().filter(|s| s.civ.as_ref().is_some_and(|c| c.tier >= CivTier::T2)).count() as f64 / n * 100.0;
+        (any, trade)
+    }
+
+    /// The civilisation option crowds the galaxy step by step, and more of
+    /// the extra civs are ones you can trade with.
+    #[test]
+    fn civilisation_option_scales_civs() {
+        use crate::sim::Abundance::*;
+        let rates: Vec<(f64, f64)> = [Scarce, Normal, Abundant]
+            .into_iter()
+            .map(|c| civ_rates(&sample_with(11, 50, opts(Normal, c))))
+            .collect();
+        assert!(rates[0].0 < rates[1].0 && rates[1].0 < rates[2].0, "{rates:?}");
+        assert!(rates[0].1 < rates[1].1 && rates[1].1 < rates[2].1, "{rates:?}");
+        assert!((5.0..=12.0).contains(&rates[1].0), "Normal any civ {:.2}%", rates[1].0);
+        assert!((14.0..=28.0).contains(&rates[2].0), "Abundant any civ {:.2}%", rates[2].0);
+    }
+
+    /// The resources option scales how many carbon/nitrogen deposits exist
+    /// and how much is in them.
+    #[test]
+    fn resource_option_scales_deposits() {
+        use crate::sim::Abundance::*;
+        let stats: Vec<(usize, f64)> = [Scarce, Normal, Abundant]
+            .into_iter()
+            .map(|r| {
+                let systems = sample_with(3, 20, opts(r, Scarce));
+                let mut count = 0;
+                let mut tons = 0.0;
+                for s in &systems {
+                    for p in all_bodies(s) {
+                        for d in &p.deposits {
+                            if matches!(d.res, Res::Nitrogen | Res::Carbon) {
+                                count += 1;
+                                tons += d.tons;
+                            }
+                        }
+                    }
+                }
+                (count, tons)
+            })
+            .collect();
+        assert!(stats[0].0 < stats[1].0 && stats[1].0 < stats[2].0, "{stats:?}");
+        assert!(stats[0].1 < stats[1].1 && stats[1].1 < stats[2].1, "{stats:?}");
+    }
+
+    /// Options change what systems hold, not where the stars are; and the
+    /// same seed with the same options is always the same galaxy.
+    #[test]
+    fn options_keep_the_star_map() {
+        use crate::sim::Abundance::*;
+        let rich = opts(Abundant, Abundant);
+        let mut a = Galaxy::with_opts(77, rich);
+        let mut b = Galaxy::with_opts(77, rich);
+        let mut plain = Galaxy::new(77);
+        for id in a.ids_in_cell(3, -4).into_iter().chain(a.ids_in_cell(1, 2)) {
+            assert_eq!(serde_json::to_string(a.system(id)).unwrap(), serde_json::to_string(b.system(id)).unwrap());
+            assert_eq!(a.system(id).star.name, plain.system(id).star.name);
+            assert_eq!(a.system(id).pos, plain.system(id).pos);
+        }
+    }
+
+    /// The home system stays workable however scarce resources are.
+    #[test]
+    fn home_is_curated_at_every_resource_level() {
+        for r in crate::sim::Abundance::ALL {
+            let mut gal = Galaxy::with_opts(9, opts(r, crate::sim::Abundance::Abundant));
+            let s = gal.system(gal.home_id()).clone();
+            assert!(s.civ.is_none());
             assert!(s.planets.iter().any(|p| p.class == PlanetClass::IceGiant
                 && p.deposits.iter().any(|d| d.res == Res::Nitrogen && d.tons >= 60_000.0)));
         }

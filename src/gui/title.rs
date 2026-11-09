@@ -5,8 +5,35 @@ use super::theme::*;
 use super::View;
 use crate::game::{Action, App, Screen};
 use crate::sim::save;
-use crate::sim::{fmt_daytime, fmt_kg, SHIPS};
+use crate::sim::{fmt_daytime, fmt_kg, Abundance, GalaxyOpts, Risk, SHIPS};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, RichText, Sense, Shape, Stroke, Ui};
+
+/// The galaxy option rows under the title buttons. Each change rebuilds the
+/// galaxy (same seed, new options), so the next New game uses them.
+fn galaxy_options(ui: &mut Ui, opts: GalaxyOpts, acts: &mut Vec<Action>) {
+    const LABEL_W: f32 = 110.0;
+    const BTN_W: f32 = 96.0;
+    let row_w = LABEL_W + 3.0 * BTN_W + 3.0 * ui.spacing().item_spacing.x;
+    // One option row: a label, then three exclusive choices with tooltips.
+    let mut row = |ui: &mut Ui, label: &str, choices: [(&str, &str, bool, GalaxyOpts); 3]| {
+        ui.horizontal(|ui| {
+            ui.add_space(((ui.available_width() - row_w) / 2.0).max(0.0));
+            ui.add_sized(vec2(LABEL_W, 24.0), egui::Label::new(dim(label)));
+            for (name, tip, sel, next) in choices {
+                let b = egui::Button::selectable(sel, RichText::new(name).color(if sel { KEY } else { TEXT })).min_size(vec2(BTN_W, 24.0));
+                if ui.add(b).on_hover_text(tip).clicked() && !sel {
+                    acts.push(Action::SetOpts(next));
+                }
+            }
+        });
+    };
+    let res = Abundance::ALL.map(|a| (a.name(), GalaxyOpts::resources_blurb(a), opts.resources == a, GalaxyOpts { resources: a, ..opts }));
+    let civ = Abundance::ALL.map(|a| (a.name(), GalaxyOpts::civs_blurb(a), opts.civs == a, GalaxyOpts { civs: a, ..opts }));
+    let risk = Risk::ALL.map(|r| (r.name(), r.blurb(), opts.risk == r, GalaxyOpts { risk: r, ..opts }));
+    row(ui, "Resources", res);
+    row(ui, "Civilization", civ);
+    row(ui, "Risk", risk);
+}
 
 /// A simple vector silhouette per hull, pointing right.
 fn ship_art(painter: &egui::Painter, c0: Pos2, s: f32, idx: usize, col: Color32) {
@@ -143,6 +170,8 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                     acts.push(Action::Quit);
                 }
             });
+            ui.add_space(14.0);
+            galaxy_options(ui, app.gal.opts, acts);
             ui.add_space(8.0);
             ui.label(dim("Pick a ship with 1–3 or the arrow keys, or double-click a card."));
         });
@@ -177,6 +206,7 @@ pub fn game_over(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>
                         ("Crew lost", st.crew_lost.to_string()),
                         ("Passengers lost", st.pax_lost.to_string()),
                         ("Galaxy seed", format!("0x{:012X}", sim.seed)),
+                        ("Galaxy", sim.opts.summary()),
                     ] {
                         ui.label(dim(k));
                         ui.label(v);

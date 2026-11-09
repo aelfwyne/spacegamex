@@ -68,8 +68,8 @@ pub struct StarSystem {
 }
 
 impl StarSystem {
-    pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool) -> Self {
-        super::worldgen::generate(seed, id, pos, is_home)
+    pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool, opts: &super::opts::GalaxyOpts) -> Self {
+        super::worldgen::generate(seed, id, pos, is_home, opts)
     }
 
     /// Every dockable body: planets, belts, and the moons of gas giants.

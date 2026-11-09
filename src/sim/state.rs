@@ -6,6 +6,7 @@
 use super::civ::{CivKind, CivTier};
 use super::galaxy::{Galaxy, Neighbor};
 use super::logbuf::{Level, Log};
+use super::opts::GalaxyOpts;
 use super::res::{Inventory, Res};
 use super::ship::ShipSpec;
 use super::system::StarSystem;
@@ -258,6 +259,9 @@ pub struct Sim {
     /// events fired ~10x less often at 1x than in fast-forward.
     #[serde(default)]
     pub rng_step: u64,
+    /// The galaxy options this game was started with (title screen).
+    #[serde(default)]
+    pub opts: GalaxyOpts,
 }
 
 fn poisson(rng: &mut StdRng, lambda: f64) -> u32 {
@@ -613,6 +617,12 @@ impl Sim {
         self.raw_base(r) + buffer
     }
 
+    /// Scale for the rate of negative random events (the Risk option).
+    /// Every new kind of mishap should multiply its odds by this.
+    pub fn risk_mult(&self) -> f64 {
+        self.opts.risk.event_mult()
+    }
+
     pub fn t_h(&self) -> f64 {
         self.t / 3600.0
     }
@@ -685,6 +695,7 @@ impl Sim {
             salvage_on: false,
             last_hull_source: "—".into(),
             rng_step: 0,
+            opts: gal.opts,
         };
 
         sim.log.push(0.0, Level::Info, format!("{} docked at {} ({}).", spec.name, star_name, catalog));
@@ -1712,7 +1723,7 @@ impl Sim {
             0.05 * body_belt
         } else {
             0.05
-        };
+        } * self.risk_mult();
         let n = poisson(&mut rng, lam * dt_h);
         for _ in 0..n {
             let d = rng.random_range(0.05..0.4);
@@ -1727,7 +1738,7 @@ impl Sim {
         }
 
         // ---------- faults: spawn / expire / repair ----------
-        if self.faults.is_empty() && rng.random_bool((0.025 * dt_h).min(0.5)) {
+        if self.faults.is_empty() && rng.random_bool((0.025 * self.risk_mult() * dt_h).min(0.5)) {
             let kind = match rng.random::<f64>() {
                 r if r < 0.25 => FaultKind::Reactor,
                 r if r < 0.5 => FaultKind::LifeSupport,
@@ -1742,8 +1753,8 @@ impl Sim {
         // Local hazards: wildlife that tears into the drones, and air that
         // seeps through every seal into life support.
         if self.faults.is_empty() && at_planet && !moving && !tripping {
-            let drone_risk = if body_danger && self.mining_on { 0.05 } else { 0.0 };
-            let ls_risk = if infiltrating { 0.05 } else { 0.0 };
+            let drone_risk = if body_danger && self.mining_on { 0.05 * self.risk_mult() } else { 0.0 };
+            let ls_risk = if infiltrating { 0.05 * self.risk_mult() } else { 0.0 };
             let kind = if drone_risk > 0.0 && rng.random_bool((drone_risk * dt_h).min(0.5)) {
                 Some((FaultKind::Drones, "Native wildlife attacked the drones"))
             } else if ls_risk > 0.0 && rng.random_bool((ls_risk * dt_h).min(0.5)) {
@@ -2830,6 +2841,34 @@ mod fix_tests {
             let mean = sum as f64 / n as f64;
             assert!((mean - lam).abs() < lam * 0.1 + 0.002, "λ={lam} mean={mean}");
         }
+    }
+
+    /// The Risk option scales how often things break: over the same long,
+    /// fixed-seed stay, Tourist sees fewer faults than Normal, Risky more.
+    #[test]
+    fn risk_option_scales_faults() {
+        use crate::sim::{GalaxyOpts, Risk};
+        let faults = |risk: Risk| {
+            let mut gal = Galaxy::with_opts(42, GalaxyOpts { risk, ..GalaxyOpts::default() });
+            let mut sim = Sim::new_game(42, 1, &mut gal);
+            assert_eq!(sim.opts.risk, risk);
+            // Early MAT repair clears a fault inside the step it spawns in.
+            sim.repair_on = false;
+            let mut n = 0;
+            for _ in 0..3_000 {
+                let had = !sim.faults.is_empty();
+                sim.advance(0.1, &mut gal);
+                if !had && !sim.faults.is_empty() {
+                    n += 1;
+                }
+                if sim.over.is_some() {
+                    break;
+                }
+            }
+            n
+        };
+        let (t, n, r) = (faults(Risk::Tourist), faults(Risk::Normal), faults(Risk::Risky));
+        assert!(t < n && n < r, "tourist {t}, normal {n}, risky {r}");
     }
 
     /// Per-step random rolls must not repeat just because several steps

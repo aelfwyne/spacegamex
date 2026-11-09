@@ -13,6 +13,7 @@
 //! direction, forever — the universe is infinite and always has more systems.
 
 use super::civ::CivTier;
+use super::opts::GalaxyOpts;
 use super::system::StarSystem;
 use crate::rngx::{derive, mix64, unit2};
 use rand::RngExt;
@@ -34,6 +35,7 @@ const K_MASK: u64 = (1u64 << K_BITS) - 1; // 3
 
 pub struct Galaxy {
     pub seed: u64,
+    pub opts: GalaxyOpts,
     pub cache: HashMap<u64, StarSystem>,
 }
 
@@ -57,7 +59,11 @@ pub struct Neighbor {
 
 impl Galaxy {
     pub fn new(seed: u64) -> Self {
-        Self { seed, cache: HashMap::new() }
+        Self::with_opts(seed, GalaxyOpts::default())
+    }
+
+    pub fn with_opts(seed: u64, opts: GalaxyOpts) -> Self {
+        Self { seed, opts, cache: HashMap::new() }
     }
 
     // ---------- ID <-> cell packing ----------
@@ -124,7 +130,7 @@ impl Galaxy {
         let seed = self.seed;
         if !self.cache.contains_key(&id) {
             let is_home = id == self.home_id();
-            let sys = StarSystem::generate(seed, id, Self::pos_of(id), is_home);
+            let sys = StarSystem::generate(seed, id, Self::pos_of(id), is_home, &self.opts);
             self.cache.insert(id, sys);
         }
         self.cache.get_mut(&id).unwrap()

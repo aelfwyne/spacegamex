@@ -182,7 +182,8 @@ pub fn enforce_colony_requirement(b: &mut Proto) {
     }
 }
 
-pub fn tech_weights(rarer: bool) -> Vec<(NativeTech, f64)> {
+/// `adv` scales the spacefaring levels (the civilisation option).
+pub fn tech_weights(rarer: bool, adv: f64) -> Vec<(NativeTech, f64)> {
     use NativeTech::*;
     let r = |a: f64, b: f64| if rarer { a } else { b };
     vec![
@@ -192,23 +193,24 @@ pub fn tech_weights(rarer: bool) -> Vec<(NativeTech, f64)> {
         (EarlyIndustrial, 12.0),
         (Industrial, 10.0),
         (Atomic, r(7.0, 8.0)),
-        (SpaceAge, r(4.0, 6.0)),
-        (Interplanetary, r(2.0, 3.0)),
-        (Interstellar, r(1.0, 2.0)),
-        (AdvancedInterstellar, r(0.5, 1.0)),
+        (SpaceAge, r(4.0, 6.0) * adv),
+        (Interplanetary, r(2.0, 3.0) * adv),
+        (Interstellar, r(1.0, 2.0) * adv),
+        (AdvancedInterstellar, r(0.5, 1.0) * adv),
         (PostApocStone, r(7.0, 8.0)),
         (PostApocIndustrial, r(4.0, 6.0)),
         (PostApocAtomic, r(2.0, 4.0)),
-        (PostApocSpace, r(1.0, 2.0)),
+        (PostApocSpace, r(1.0, 2.0) * adv),
         (ExtinctRuins, r(0.5, 1.0)),
     ]
 }
 
 /// How many sentient species evolved here (each needs the previous one).
-pub fn roll_sentients(rng: &mut StdRng, life: LifeType) -> u8 {
+/// `mult` scales the first roll (the civilisation option).
+pub fn roll_sentients(rng: &mut StdRng, life: LifeType, mult: f64) -> u8 {
     let [a, b, c] = life.sentient_odds();
     let mut n = 0;
-    if percent(rng, a * SENTIENT_SCALE) {
+    if percent(rng, (a * SENTIENT_SCALE * mult).min(95.0)) {
         n += 1;
         if percent(rng, b * 2.0) {
             n += 1;

@@ -57,6 +57,7 @@ pub enum Action {
     // ---- title ----
     SelectShip(usize),
     SetSeed(u64),
+    SetOpts(crate::sim::GalaxyOpts),
     NewGame,
     Continue,
     // ---- navigation ----
@@ -238,7 +239,7 @@ impl App {
 
     pub fn start_new_game(&mut self, ship_idx: usize) {
         let seed = self.gal.seed;
-        self.gal = Galaxy::new(seed);
+        self.gal = Galaxy::with_opts(seed, self.gal.opts);
         let sim = Sim::new_game(seed, ship_idx, &mut self.gal);
         self.sim = Some(sim);
         self.screen = Screen::Cockpit;
@@ -401,6 +402,7 @@ impl App {
             a,
             Action::SelectShip(_)
                 | Action::SetSeed(_)
+                | Action::SetOpts(_)
                 | Action::NewGame
                 | Action::Continue
                 | Action::Open(Screen::Help)
@@ -414,7 +416,8 @@ impl App {
         }
         match a {
             Action::SelectShip(i) => self.title_sel = i.min(crate::sim::SHIPS.len() - 1),
-            Action::SetSeed(s) => self.gal = Galaxy::new(s),
+            Action::SetSeed(s) => self.gal = Galaxy::with_opts(s, self.gal.opts),
+            Action::SetOpts(o) => self.gal = Galaxy::with_opts(self.gal.seed, o),
             Action::NewGame => self.start_new_game(self.title_sel),
             Action::Continue => self.continue_game(),
             Action::Open(s) => self.open(s),
@@ -424,7 +427,7 @@ impl App {
                 save::delete();
                 let seed = self.gal.seed;
                 self.sim = None;
-                self.gal = Galaxy::new(seed);
+                self.gal = Galaxy::with_opts(seed, self.gal.opts);
                 self.screen = Screen::Title;
             }
 

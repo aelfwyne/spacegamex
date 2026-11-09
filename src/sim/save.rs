@@ -17,6 +17,9 @@ pub struct SaveFile {
     pub version: u32,
     pub sim: Sim,
     pub seed: u64,
+    /// Galaxy options; saves from before they existed used the defaults.
+    #[serde(default)]
+    pub opts: super::opts::GalaxyOpts,
     pub systems: Vec<(u64, StarSystem)>,
 }
 
@@ -57,6 +60,7 @@ pub fn save(sim: &Sim, galaxy: &Galaxy) -> std::io::Result<std::path::PathBuf> {
         version: VERSION,
         sim: sim.clone(),
         seed: galaxy.seed,
+        opts: galaxy.opts,
         systems,
     };
     let json = serde_json::to_string(&file).map_err(std::io::Error::other)?;
@@ -91,7 +95,7 @@ pub fn load() -> Result<(Sim, Galaxy), String> {
             file.version, VERSION
         ));
     }
-    let mut galaxy = Galaxy::new(file.seed);
+    let mut galaxy = Galaxy::with_opts(file.seed, file.opts);
     let systems: HashMap<u64, StarSystem> = file.systems.into_iter().collect();
     galaxy.cache = systems;
     // Regenerate what the save left out but the game will look up at once:
