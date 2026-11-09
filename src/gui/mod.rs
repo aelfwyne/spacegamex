@@ -31,11 +31,28 @@ pub struct View {
     pub map_zoom: f32,
     pub last_map_sel: usize,
     pub seed_text: String,
+    /// System-view camera: zoom multiplier, pan (px), framing, and the
+    /// system it was set up for (reset on arrival somewhere new).
+    pub sys_zoom: f32,
+    pub sys_pan: egui::Vec2,
+    pub sys_focus: sysview::Focus,
+    pub sys_last: u64,
 }
 
 impl Default for View {
     fn default() -> Self {
-        View { anim_t: 0.0, warp_t: 0.0, map_pan: egui::Vec2::ZERO, map_zoom: 0.0, last_map_sel: usize::MAX, seed_text: String::new() }
+        View {
+            anim_t: 0.0,
+            warp_t: 0.0,
+            map_pan: egui::Vec2::ZERO,
+            map_zoom: 0.0,
+            last_map_sel: usize::MAX,
+            seed_text: String::new(),
+            sys_zoom: 1.0,
+            sys_pan: egui::Vec2::ZERO,
+            sys_focus: sysview::Focus::A,
+            sys_last: u64::MAX,
+        }
     }
 }
 
@@ -61,6 +78,50 @@ impl GuiApp {
     }
 }
 
+/// Debug preview: move the ship to the nearest system showing `feature`
+/// and select the body that shows it.
+fn preview_feature(app: &mut App, feature: &str) {
+    use crate::sim::planet::{AtmoKind, GgFeature, Host, LifeType, PlanetClass};
+    use crate::sim::Loc;
+    for r in 0..60i64 {
+        for cx in -r..=r {
+            for cy in -r..=r {
+                if cx.abs() != r && cy.abs() != r {
+                    continue;
+                }
+                for id in app.gal.ids_in_cell(cx, cy) {
+                    let s = app.gal.system(id).clone();
+                    let pick: Option<Loc> = match feature {
+                        "pbin" => s.companion.as_ref().filter(|c| c.p_type).map(|_| Loc::Star),
+                        "sbin" => (s.companion_dockable() && s.planets.iter().filter(|p| p.host == Host::B).count() >= 2).then_some(Loc::Companion),
+                        "natives" => s.sites().into_iter().find(|(_, p)| p.natives.as_ref().is_some_and(|n| n.species_count > 0)).map(|(l, _)| l),
+                        "colony" => s.sites().into_iter().find(|(_, p)| p.colony.as_ref().is_some_and(|c| c.tech.active())).map(|(l, _)| l),
+                        "belt" => s.sites().into_iter().find(|(_, p)| p.class == PlanetClass::AsteroidBelt).map(|(l, _)| l),
+                        "rings" => s.sites().into_iter().find(|(_, p)| p.gg_feature == Some(GgFeature::Rings) && p.satellites.len() >= 6).map(|(l, _)| l),
+                        "storm" => s.sites().into_iter().find(|(_, p)| p.gg_feature == Some(GgFeature::SingleSuperStorm)).map(|(l, _)| l),
+                        "life" => s.sites().into_iter().find(|(_, p)| p.life == Some(LifeType::Forests) && !p.is_moon && p.geosphere.is_some_and(|g| g.is_wet())).map(|(l, _)| l),
+                        "locked" => s.sites().into_iter().find(|(_, p)| p.tidally_locked && p.atmosphere == Some(AtmoKind::Breathable)).map(|(l, _)| l),
+                        "corrosive" => s.sites().into_iter().find(|(_, p)| p.atmosphere == Some(AtmoKind::Corrosive) && !p.is_moon).map(|(l, _)| l),
+                        "ice" => s.sites().into_iter().find(|(_, p)| p.class == PlanetClass::IceWorld && !p.is_moon && p.terrain.iter().any(|t| t.contains("fissure"))).map(|(l, _)| l),
+                        _ => None,
+                    };
+                    if let Some(l) = pick {
+                        let sim = app.sim.as_mut().unwrap();
+                        sim.sys_id = id;
+                        sim.trip = None;
+                        sim.shuttle = None;
+                        sim.loc = Loc::Star;
+                        if l.is_body() {
+                            app.apply(Action::SelectBody(l));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn preview(app: &mut App, spec: &str) {
     let mut it = spec.split(',');
     let screen = it.next().unwrap_or("cockpit");
@@ -79,6 +140,9 @@ fn preview(app: &mut App, spec: &str) {
         }
     }
     app.drain_log();
+    if let Some(feature) = it.next() {
+        preview_feature(app, feature);
+    }
     app.refresh_map();
     let s = match screen {
         "map" => Screen::Map,
@@ -293,7 +357,12 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
                 ui.label(RichText::new(format!("→ {} ({})", loc_label(leg.to, sys), fmt_hours(leg.remaining_h))).color(WARN));
             }
             if let Some(civ) = &sys.civ {
-                ui.label(RichText::new(format!("· {} ({:?})", civ.name, civ.tier)).color(CIV));
+                let what = match civ.tier {
+                    crate::sim::civ::CivTier::T3 => "station",
+                    crate::sim::civ::CivTier::T2 => "market",
+                    crate::sim::civ::CivTier::T1 => "no trade",
+                };
+                ui.label(RichText::new(format!("· {} ({what})", civ.display())).color(CIV));
             }
         }
         ui.separator();
@@ -505,6 +574,94 @@ mod smoke_tests {
                     Some(GameOver { cause: "smoke test".into(), detail: "drawn, not died".into(), t: 100.0 });
                 app.screen = Screen::GameOver;
                 frame(&ctx, &app, &mut view, w, h);
+            }
+        }
+    }
+
+    /// Every new kind of place, docked and viewed: close and wide binaries,
+    /// natives, colonies, salvage, belts, gas-giant moons, the companion
+    /// star. Systems are found by scanning the galaxy, then visited directly.
+    #[test]
+    fn feature_tour_renders() {
+        use crate::sim::planet::PlanetClass;
+        use crate::sim::Loc;
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut view = View::default();
+        let mut app = App::with_game(42, 2);
+        let mut want: Vec<(&str, Option<u64>)> = vec![
+            ("p-type", None),
+            ("s-type", None),
+            ("natives", None),
+            ("colony", None),
+            ("salvage", None),
+            ("belt", None),
+        ];
+        'scan: for cx in -40..40 {
+            for cy in -40..40 {
+                for id in app.gal.ids_in_cell(cx, cy) {
+                    let s = app.gal.system(id).clone();
+                    for (k, slot) in want.iter_mut() {
+                        if slot.is_some() {
+                            continue;
+                        }
+                        let hit = match *k {
+                            "p-type" => s.companion.as_ref().is_some_and(|c| c.p_type),
+                            "s-type" => s.companion_dockable() && s.planets.iter().any(|p| p.host == crate::sim::planet::Host::B),
+                            "natives" => s.sites().iter().any(|(_, p)| p.natives.as_ref().is_some_and(|n| n.species_count > 0)),
+                            "colony" => s.sites().iter().any(|(_, p)| p.colony.is_some()),
+                            "salvage" => s.sites().iter().any(|(_, p)| p.salvage.is_some()),
+                            "belt" => s.planets.iter().any(|p| p.class == PlanetClass::AsteroidBelt),
+                            _ => false,
+                        };
+                        if hit {
+                            *slot = Some(id);
+                        }
+                    }
+                    if want.iter().all(|(_, s)| s.is_some()) {
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        for (k, slot) in &want {
+            let id = slot.unwrap_or_else(|| panic!("no {k} system found"));
+            let sys = app.gal.system(id).clone();
+            let mut locs = vec![Loc::Star];
+            if sys.companion_dockable() {
+                locs.push(Loc::Companion);
+            }
+            for (l, p) in sys.sites() {
+                let interesting = p.natives.is_some() || p.colony.is_some() || p.salvage.is_some() || p.class == PlanetClass::AsteroidBelt || matches!(l, Loc::Moon(_, 0));
+                if interesting && locs.len() < 8 {
+                    locs.push(l);
+                }
+            }
+            {
+                let sim = app.sim.as_mut().unwrap();
+                sim.sys_id = id;
+                sim.trip = None;
+                sim.shuttle = None;
+            }
+            app.refresh_map();
+            for l in locs {
+                app.sim.as_mut().unwrap().loc = l;
+                if l.is_body() {
+                    app.apply(Action::SelectBody(l));
+                }
+                for scr in [Screen::Cockpit, Screen::Planet, Screen::Star, Screen::Trade, Screen::Map] {
+                    app.screen = scr;
+                    frame(&ctx, &app, &mut view, 1280.0, 800.0);
+                }
+                // Zoomed in, and framing the companion.
+                view.sys_zoom = 4.0;
+                view.sys_focus = sysview::Focus::B;
+                app.screen = Screen::Cockpit;
+                frame(&ctx, &app, &mut view, 1280.0, 800.0);
+                view.sys_focus = sysview::Focus::Both;
+                frame(&ctx, &app, &mut view, 1280.0, 800.0);
+                view.sys_zoom = 1.0;
+                view.sys_focus = sysview::Focus::A;
             }
         }
     }

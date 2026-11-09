@@ -1,18 +1,18 @@
-//! Civilization tiers and trade.
+//! Civilisation tiers and trade. A system's civilisation is derived from
+//! what the world generator put there — native species or a colony — not
+//! rolled on its own (see `worldgen::derive_civ`).
 
-use crate::rngx::name;
 use super::res::Res;
-use rand::RngExt;
-use rand::rngs::StdRng;
+use super::state::Loc;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Serialize, Deserialize)]
 pub enum CivTier {
-    /// Pre-space. No interaction beyond observation.
+    /// Pre-space (or collapsed / fallen). No interaction beyond observation.
     T1,
-    /// Space age, but no FTL: local markets only, limited stock, bad prices.
+    /// Space age natives or a working colony: a local market, limited stock.
     T2,
-    /// Interstellar (space-age+): full resupply station and trade.
+    /// Interstellar natives or an industrial colony: full resupply station.
     T3,
 }
 
@@ -26,20 +26,31 @@ impl CivTier {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CivKind {
+    Natives,
+    Colony,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Civ {
     pub tier: CivTier,
+    /// Species name (natives) or colony name.
     pub name: String,
+    pub kind: CivKind,
+    /// The world they live on.
+    pub seat: Loc,
+    /// A small outpost market (half stock).
+    pub small: bool,
 }
 
 impl Civ {
-    pub fn generate(rng: &mut StdRng) -> Civ {
-        let tier = match rng.random::<f64>() {
-            r if r < 0.50 => CivTier::T1,
-            r if r < 0.85 => CivTier::T2,
-            _ => CivTier::T3,
-        };
-        Civ { tier, name: name(rng) }
+    /// "the Zaquel" / "Fort Kyra".
+    pub fn display(&self) -> String {
+        match self.kind {
+            CivKind::Natives => format!("the {}", self.name),
+            CivKind::Colony => self.name.clone(),
+        }
     }
 }
 

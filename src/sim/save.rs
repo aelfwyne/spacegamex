@@ -7,9 +7,10 @@ use super::system::StarSystem;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// v2: star positions spread across their grid cell (v1 galaxies had a
-/// different geometry, so v1 saves cannot be continued).
-pub const VERSION: u32 = 2;
+/// v2: star positions spread across their grid cell.
+/// v3: detailed world generation (moons, binaries, life, colonies).
+/// Older galaxies have a different shape, so older saves cannot continue.
+pub const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub struct SaveFile {
@@ -43,15 +44,22 @@ pub fn save(sim: &Sim, galaxy: &Galaxy) -> std::io::Result<std::path::PathBuf> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let systems: Vec<(u64, StarSystem)> =
-        galaxy.cache.iter().map(|(k, v)| (*k, v.clone())).collect();
+    // Only systems the ship has visited can differ from their generated
+    // state (mined deposits, bought-out markets); everything else is a pure
+    // function of the seed and regenerates identically on load.
+    let systems: Vec<(u64, StarSystem)> = galaxy
+        .cache
+        .iter()
+        .filter(|(k, _)| sim.visited.contains(k) || **k == sim.sys_id)
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
     let file = SaveFile {
         version: VERSION,
         sim: sim.clone(),
         seed: galaxy.seed,
         systems,
     };
-    let json = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
+    let json = serde_json::to_string(&file).map_err(std::io::Error::other)?;
     // Write-then-rename: a crash mid-write leaves the previous save intact
     // instead of a truncated file that no longer parses.
     let tmp = path.with_extension("json.tmp");
@@ -86,7 +94,18 @@ pub fn load() -> Result<(Sim, Galaxy), String> {
     let mut galaxy = Galaxy::new(file.seed);
     let systems: HashMap<u64, StarSystem> = file.systems.into_iter().collect();
     galaxy.cache = systems;
-    Ok((file.sim, galaxy))
+    // Regenerate what the save left out but the game will look up at once:
+    // where we are, where we are going, and the local neighbourhood.
+    let sim = file.sim;
+    let here = galaxy.system(sim.sys_id).pos;
+    galaxy.neighbors(here, 60.0, sim.sys_id);
+    if let Some(d) = sim.destination {
+        galaxy.system(d);
+    }
+    if let Some(t) = &sim.trip {
+        galaxy.system(t.dest_id);
+    }
+    Ok((sim, galaxy))
 }
 
 pub fn delete() {

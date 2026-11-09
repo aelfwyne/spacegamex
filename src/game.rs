@@ -82,10 +82,14 @@ pub enum Action {
     ToggleRepair,
     ToggleDroneAuto,
     CycleMineTarget,
-    /// (planet, deposit)
-    SetMineTarget(usize, usize),
+    /// (body, deposit)
+    SetMineTarget(Loc, usize),
+    /// Drones strip wreckage instead of mining.
+    ToggleSalvage,
     // ---- in-system ----
     SelectPlanet(usize),
+    /// Select any body (planet or moon).
+    SelectBody(Loc),
     /// Step the planet selection by ±1 (wraps).
     StepPlanet(i32),
     /// Star ↔ selected planet (the cockpit `S` key).
@@ -136,6 +140,8 @@ pub struct App {
 
     pub title_sel: usize,
     pub sel_planet: usize,
+    /// A moon of the selected planet, if one is selected.
+    pub sel_moon: Option<usize>,
     pub map_list: Vec<Neighbor>,
     pub map_sel: usize,
     pub trade_row: usize,
@@ -163,6 +169,7 @@ impl App {
             gal: Galaxy::new(seed),
             title_sel: 0,
             sel_planet: 0,
+            sel_moon: None,
             map_list: vec![],
             map_sel: 0,
             trade_row: 0,
@@ -304,6 +311,7 @@ impl App {
                 )
             }
             ShuttleBlock::AlreadyThere => "Already docked here.".to_string(),
+            ShuttleBlock::Nowhere => "There is no such place in this system.".to_string(),
         };
         if sim.ff == 0 { format!("{msg} (paused — resume time to fly)") } else { msg }
     }
@@ -364,6 +372,14 @@ impl App {
             Some(CivTier::T2) | Some(CivTier::T3) => None,
             Some(CivTier::T1) => Some("They haven't even left their planet. No trade possible."),
             None => Some("No one here to trade with. Just stars and rock."),
+        }
+    }
+
+    /// The selected body as a location (planet, or one of its moons).
+    pub fn selected_body(&self) -> Loc {
+        match self.sel_moon {
+            Some(m) => Loc::Moon(self.sel_planet, m),
+            None => Loc::Planet(self.sel_planet),
         }
     }
 
@@ -462,6 +478,7 @@ impl App {
                     sim.cycle_mine_target(&self.gal);
                 }
             }
+            Action::ToggleSalvage => self.with_sim(|s| s.toggle_salvage()),
             Action::SetMineTarget(p, d) => {
                 let sim = self.sim.as_mut().unwrap();
                 sim.set_mine_target(&self.gal, p, d);
@@ -470,18 +487,32 @@ impl App {
             Action::SelectPlanet(i) => {
                 let n = self.planet_count();
                 self.sel_planet = i.min(n.saturating_sub(1));
+                self.sel_moon = None;
             }
+            Action::SelectBody(l) => match l {
+                Loc::Planet(i) => self.apply(Action::SelectPlanet(i)),
+                Loc::Moon(i, m) => {
+                    self.apply(Action::SelectPlanet(i));
+                    self.sel_moon = Some(m);
+                }
+                _ => {}
+            },
             Action::StepPlanet(d) => {
                 let n = self.planet_count().max(1) as i64;
                 self.sel_planet = (self.sel_planet as i64 + d as i64).rem_euclid(n) as usize;
+                self.sel_moon = None;
             }
             Action::ShuttleToggle => {
                 let n = self.planet_count();
                 self.sel_planet = self.sel_planet.min(n.saturating_sub(1));
                 let to = match self.sim().loc {
-                    Loc::Star => Loc::Planet(self.sel_planet),
-                    Loc::Planet(i) => {
-                        self.sel_planet = i;
+                    Loc::Star | Loc::Companion => self.selected_body(),
+                    l => {
+                        self.sel_planet = l.planet().unwrap_or(0);
+                        self.sel_moon = match l {
+                            Loc::Moon(_, m) => Some(m),
+                            _ => None,
+                        };
                         Loc::Star
                     }
                 };
@@ -771,6 +802,7 @@ impl App {
             Key::Char('k') => Action::Open(Screen::Trade),
             Key::Char('f') => Action::CycleTimeScale,
             Key::Char('x') => Action::SkipToArrival,
+            Key::Char('v') => Action::ToggleSalvage,
             Key::Char('g') => Action::Save,
             Key::Char('h') => Action::Open(Screen::Help),
             Key::Char('q') => Action::Quit,

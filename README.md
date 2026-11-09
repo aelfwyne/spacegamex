@@ -81,20 +81,68 @@ The objective is simply **to survive**, indefinitely. The ship has:
 
 ### Systems are real places
 
-Every system has a star with a real spectrum (class, mass, luminosity,
-temperature), and planets placed by habitable-zone physics: each world has a
-class, an orbital distance in AU, an atmosphere, moons, and **finite tonnage
-deposits** that deplete as you mine. Distant ore worlds are not free: the
-shuttle round trip is real time, and the fab keeps drinking while the drones
-sit in transit. A base test (mine rate vs. fab draw, duty-weighted, per ore
-and in total) decides whether a system can actually sustain a ship — most
-cannot, and the autopilot knows it.
+Every system is generated in detail (the generator is adapted from a
+tabletop star-system generator the author wrote earlier):
 
-Civilizations are rare (about 1 in 50 systems). T2 (planetary) civs sell
-limited food/water/meds — a waypoint, not a life. T3 (interstellar) stations
-stock two million tons of everything: the only true resupply, and the only
-place to buy feedstock cheap. Most of the galaxy has no one to trade with,
-which is the point: the ship must be able to live off its own drones.
+- **Stars** with a spectral and luminosity class: mostly red dwarfs, as
+  in the real galaxy, plus orange, yellow and white main-sequence stars,
+  subgiants, giants and white dwarfs. Each has a real mass, radius,
+  luminosity, temperature and habitable zone.
+- **Binaries** (about 1 in 20): a *close* pair that planets orbit together
+  (circumbinary), or an *intermediate*, *wide* or *distant* companion that
+  strips away unstable orbits and may have planets of its own. Stability
+  limits follow Holman & Wiegert (1999). A wide companion is a second star
+  you can shuttle to and scoop.
+- **Gas giants** with features (storms, a single super-storm, rings, high
+  winds, intense radiation fields, or small ice giants) and **5–10
+  moons each**, every one a full world you can dock at.
+- **Terrestrial and ice worlds** with size, gravity, atmosphere (thin,
+  breathable, toxic, dense, corrosive, infiltrating), temperature band,
+  geosphere (desert → water world), a surface layout, and distinctive
+  terrain features. Close-in worlds around red dwarfs may be tidally
+  locked.
+- **Asteroid belts**: rich in metal and silicate; some are mineral-rich,
+  wide, dusty or studded with dwarf planets.
+- **Native life** — microbial mats to forests, giant or hostile wildlife,
+  ocean life, subsurface life, sky plankton and floating leviathans, or
+  the fossils of extinct life.
+- **Sentient natives** (Stone Age to Advanced Interstellar, collapsed
+  post-apocalyptic societies, or only ruins), with population, politics and
+  orbital infrastructure; spacefaring ones settle their neighbouring worlds.
+- **Colonies** planted by other peoples: frontier outposts, survey
+  stations, settled, industrial and advanced colonies — and fallen or
+  derelict ones.
+
+Every world has **finite tonnage deposits** that follow from what it is
+(volume-scaled, so a small moon is a pocket, not a mine). Distant ore
+worlds are not free: the shuttle round trip is real time, and the fab keeps
+drinking while the drones sit in transit. A base test (mine rate vs. fab
+draw, duty-weighted, per ore and in total) decides whether a system can
+actually sustain a ship — most cannot (about one system in six), and the
+autopilot knows it.
+
+**Trade** comes from who actually lives there. Space-age natives or a
+working colony run a T2 market (limited food, water, medicine and
+materials — a waypoint, not a life). Interstellar natives or an
+industrial colony run a T3 station that stocks two million tons of
+everything: the only true resupply. Pre-space natives can only be
+observed. About 2 systems in 100 hold any civilisation at all; under 1 in
+100 will trade.
+
+### What worlds do to you
+
+| Trait | Effect while docked |
+|---|---|
+| Corrosive / infiltrating air | Hull damage (halved with shields); infiltrating air also causes life-support faults |
+| Breathable air, cold or temperate, no dangerous wildlife | Shore leave: crew morale rises |
+| A giant's intense radiation fields (and its moons) | Radiation damage unless shields are up |
+| Storms, high winds, a super-storm | Scoop yield ×0.95 / ×0.85 / ×0.7 |
+| Sky ecosystems | Scooping also strains out carbon |
+| Hostile or giant wildlife | Drone faults three times as likely while mining |
+| Living biospheres | Extra carbon and nitrogen deposits |
+| Asteroid belts | More micrometeorite strikes (dust belts most of all) |
+| Close binaries, white dwarfs | Their own radiation levels; a close pair is scooped together |
+| Derelict colonies, ruins, abandoned stations | **Salvage** (`V`): drones strip structural material and metal, sometimes valuables |
 
 ### FTL
 
@@ -131,8 +179,10 @@ the regression tests to prove the game is survivable.
 
 ### Mouse
 
-- **Cockpit (system view):** click a world to select it; double-click a
-  world (or the star) to shuttle there. Hover for details. The buttons under
+- **Cockpit (system view):** click a world or moon to select it;
+  double-click a world, moon, belt or star to shuttle there. Drag to pan,
+  scroll to zoom; zoom in or select a gas giant to see its moons. In a
+  binary, the view buttons frame star A, star B or both. Hover for details. The buttons under
   the view step through planets, shuttle, or open the planet page.
 - **Star map:** drag to pan, scroll (or pinch) to zoom, click a star to
   select it, double-click to set it as the jump destination. The side panel
@@ -171,6 +221,7 @@ shortcuts.)
 | `T` / `Enter` (cockpit) | Jump, once a destination is set and charged |
 | `F` | Time compression 1x→10x→60x→600x→paused |
 | `X` | Skip to arrival (in flight; works while paused) |
+| `V` | Salvage on/off (drones strip wreckage instead of mining) |
 | `G` | Save (autosaves hourly too) |
 | `H` | Help |
 | `Q` / `Ctrl+C` / closing the window | Save and quit |
@@ -189,8 +240,9 @@ has no edge. Home is always the origin cell. Positions are pure functions
 of system IDs, so a ship can never get "lost" — only unlucky.
 
 Seeds worth trying: `42` (the regression battery seed — all three ships
-must survive 500 h), `7` (a bright-star home with a wide system and a
-notorious colony trap), `100`, `2026` (a nitrogen desert), `1234`, `999`.
+must survive 500 h), `7`, `100`, `2026`, `1234`, `999`. The home system is
+always a yellow G star with a gas giant, an ice giant and workable rocky
+inner worlds, and never has a civilisation or a companion.
 
 ## Balance notes
 
@@ -235,15 +287,17 @@ JSON in the per-user data directory:
   `~/.local/share/spacegame/save.json`)
 - Windows: `%APPDATA%\spacegame\data\save.json`
 
+Only systems you have visited are stored (everything else regenerates
+identically from the seed), so saves stay small.
+
 Autosaves every in-game hour and on quit (including closing the window);
 `G` saves on demand, **Continue** on the title loads. Saves are written to a
 temporary file and renamed, so a crash mid-save cannot corrupt the previous
 save; if a save cannot be loaded, the title screen says why.
 
-Save format 2 (this version) spreads stars across their grid cells instead
-of pinning them near the cell corner, so every galaxy's geometry changed:
-version-1 saves from the terminal edition cannot be continued (the title
-screen says so) and start a new game instead.
+Save format 3 (this version) uses the detailed world generator, so every
+galaxy changed shape: saves from earlier versions cannot be continued (the
+title screen says so) and start a new game instead.
 
 ## Building on Windows (future)
 
@@ -274,10 +328,18 @@ src/headless.rs       autopilot balance runner
 src/rngx.rs           seeded derivation + procedural name generation
 src/sim/
   galaxy.rs           infinite 10-ly grid, IDs, lazy system generation
-  star.rs             spectral classes, luminosity, habitable zone, scoop
-  planet.rs           world generation: class, AU, atmosphere, finite deposits
-  system.rs           a star system: star, planets, civ, trade stock
-  civ.rs              civilization tiers and market prices
+  star.rs             spectral and luminosity classes, physics, scoop, radiation
+  planet.rs           bodies and their traits (atmosphere, geosphere, terrain,
+                      life, natives, colony, salvage, deposits)
+  system.rs           a star system: stars, companion, bodies, sites, distances
+  civ.rs              civilisation tiers (derived from natives/colonies), prices
+  worldgen/           the detailed system generator:
+    stars.rs            star roll, binary companions, Holman–Wiegert limits
+    bodies.rs           gas giants + moons, terrestrial/ice worlds, belts
+    terrain.rs          terrain catalog and surface layouts
+    life.rs             native life, sentients, native societies
+    colony.rs           colonies
+    mod.rs              pipeline: orbits, naming, deposits, civ, home system
   res.rs              resources + inventory (+ neutral Rgb colors)
   ship.rs             the three ship specs
   state.rs            the sim: advance(), autopilot, mining, fab, trade,
@@ -307,4 +369,7 @@ Debug builds accept `SPACEGAME_PREVIEW=<screen>,<ship>,<hours>` to skip
 straight to a screen with the autopilot having flown for a while, e.g.
 `SPACEGAME_PREVIEW=map,2,40 cargo run -- --seed 7`. Screens: `cockpit`,
 `trip`, `map`, `planet`, `star`, `systems`, `resources`, `crew`, `trade`,
-`help`, `title`. Release builds ignore it.
+`help`, `title`. An optional fourth field jumps to the nearest system with a
+feature and selects it: `pbin`, `sbin`, `natives`, `colony`, `belt`,
+`rings`, `storm`, `life`, `locked`, `corrosive`, `ice` (e.g.
+`SPACEGAME_PREVIEW=planet,1,1,natives`). Release builds ignore it.

@@ -48,6 +48,9 @@ pub struct Neighbor {
     pub class: super::star::StarClass,
     pub giant: bool,
     pub civ: Option<CivTier>,
+    pub civ_kind: Option<super::civ::CivKind>,
+    /// Has a binary companion star.
+    pub binary: bool,
     pub n_planets: usize,
     pub richness: f64,
 }
@@ -154,8 +157,10 @@ impl Galaxy {
                             star_name: sys.star.name.clone(),
                             star_class: sys.star.class.glyph(),
                             class: sys.star.class,
-                            giant: sys.star.giant,
+                            giant: sys.star.giant(),
                             civ: sys.civ.as_ref().map(|c| c.tier),
+                            civ_kind: sys.civ.as_ref().map(|c| c.kind),
+                            binary: sys.companion.is_some(),
                             n_planets: sys.planets.len(),
                             richness: sys.richness(),
                         });

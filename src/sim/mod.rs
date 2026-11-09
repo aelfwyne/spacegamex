@@ -8,6 +8,7 @@ pub mod ship;
 pub mod star;
 pub mod state;
 pub mod system;
+pub mod worldgen;
 
 pub use galaxy::Galaxy;
 pub use logbuf::Level;

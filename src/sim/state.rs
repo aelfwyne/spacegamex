@@ -3,7 +3,7 @@
 //! All rates are per in-game hour. `advance` is continuous: it is correct for
 //! any dt, which is what makes fast-forward and "skip to arrival" safe.
 
-use super::civ::CivTier;
+use super::civ::{CivKind, CivTier};
 use super::galaxy::{Galaxy, Neighbor};
 use super::logbuf::{Level, Log};
 use super::res::{Inventory, Res};
@@ -84,18 +84,43 @@ pub struct Fault {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Loc {
+    /// The primary star (both stars, for a close binary).
     Star,
     Planet(usize),
+    /// (planet, moon) — a moon of a gas giant.
+    Moon(usize, usize),
+    /// Star B of a wide binary.
+    Companion,
+}
+
+impl Loc {
+    /// Docked at a star (scoop territory) rather than a body.
+    pub fn is_stellar(&self) -> bool {
+        matches!(self, Loc::Star | Loc::Companion)
+    }
+
+    pub fn is_body(&self) -> bool {
+        !self.is_stellar()
+    }
+
+    /// The planet index this location belongs to (a moon's parent).
+    pub fn planet(&self) -> Option<usize> {
+        match *self {
+            Loc::Planet(i) | Loc::Moon(i, _) => Some(i),
+            _ => None,
+        }
+    }
 }
 
 pub fn loc_label(loc: Loc, sys: &StarSystem) -> String {
     match loc {
         Loc::Star => format!("{} ({})", sys.star.name, sys.star.catalog),
-        Loc::Planet(i) => sys
-            .planets
-            .get(i)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| format!("P{i}")),
+        Loc::Companion => sys
+            .companion
+            .as_ref()
+            .map(|c| format!("{} ({})", c.star.name, c.star.code))
+            .unwrap_or_else(|| "companion star".into()),
+        _ => sys.site(loc).map(|p| p.name.clone()).unwrap_or_else(|| "unknown body".into()),
     }
 }
 
@@ -109,6 +134,8 @@ pub enum ShuttleBlock {
     Shuttling,
     /// The ship is already docked where it was asked to go.
     AlreadyThere,
+    /// No such place in this system (e.g. no companion star to dock at).
+    Nowhere,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,7 +212,7 @@ pub struct Sim {
     /// indicator) to it is all the feature needs.
     #[serde(default)]
     pub autopilot_on: bool,
-    pub mine_target: Option<(usize, usize)>, // planet idx, deposit idx
+    pub mine_target: Option<(Loc, usize)>, // body, deposit idx
     pub focus: Focus,
     pub repair_on: bool,
 
@@ -222,6 +249,9 @@ pub struct Sim {
     /// water toward 95%, the drones buffer ice toward 50%).
     #[serde(default)]
     pub water_return: bool,
+    /// Drones strip salvage (wreckage, ruins) instead of mining.
+    #[serde(default)]
+    pub salvage_on: bool,
     pub last_hull_source: String,
     /// Monotonic step counter that seeds each `advance` step's RNG. Seeding
     /// from the clock made every sub-second step share one seed, so random
@@ -305,7 +335,19 @@ const CRITICAL_HOURS: f64 = 24.0;
 /// (d_h = 0) collapses the transit term and the test is plain viability;
 /// small ships (tiny D) tolerate far wider geometries than big ones, which
 /// is exactly what the fleet experience says. Fuel is judged separately.
-fn system_can_base(planets: &[super::planet::Planet], civ: Option<&super::civ::Civ>, spec: &ShipSpec) -> bool {
+/// Bodies the drones can work safely, with their shuttle distance from the
+/// arrival star (AU). Worlds whose air eats the hull are not ore sources the
+/// ship can live off.
+fn ore_sites(sys: &StarSystem) -> Vec<(f64, &super::planet::Planet)> {
+    sys.sites()
+        .into_iter()
+        .filter(|(_, p)| p.mineable() && p.corrosion() == 0.0)
+        .map(|(l, p)| (sys.pos_au(l), p))
+        .collect()
+}
+
+fn system_can_base(sys: &StarSystem, spec: &ShipSpec) -> bool {
+    let civ = sys.civ.as_ref();
     // Only a T3 (interstellar) market is a full resupply station — 2,000,000 t
     // of everything. A T2 (planetary) market stocks ~60 t of water: a fortune
     // to a lone pilot, but a hundred-hour death sentence for a colony drawing
@@ -329,9 +371,9 @@ fn system_can_base(planets: &[super::planet::Planet], civ: Option<&super::civ::C
     for r in [Res::Ice, Res::Carbon, Res::Nitrogen] {
         let d = draw(r);
         let mut best_au: Option<f64> = None;
-        for p in planets.iter().filter(|p| p.class.mineable()) {
+        for (au, p) in ore_sites(sys) {
             if p.deposits.iter().any(|d| d.res == r && d.tons >= 1000.0) {
-                best_au = Some(best_au.map(|b| b.min(p.au)).unwrap_or(p.au));
+                best_au = Some(best_au.map(|b| b.min(au)).unwrap_or(au));
             }
         }
         let au = match best_au {
@@ -401,9 +443,15 @@ fn system_can_base(planets: &[super::planet::Planet], civ: Option<&super::civ::C
 /// Fuel plus base-ability: the full "we could live here" test.
 fn system_can_settle(gal: &mut Galaxy, id: u64, spec: &ShipSpec) -> bool {
     let s = gal.system(id);
-    let fuel = s.star.scoop_base() * spec.scoop_rate > spec.reactor_burn * 1.05
-        || s.planets.iter().any(|p| p.class.scoopable());
-    fuel && system_can_base(&s.planets, s.civ.as_ref(), spec)
+    fuel_sustains(s, spec) && system_can_base(s, spec)
+}
+
+/// Can this system keep the reactor fed: a star wind strong enough, or a
+/// giant's envelope to scoop?
+fn fuel_sustains(s: &StarSystem, spec: &ShipSpec) -> bool {
+    s.scoop_at(Loc::Star) * spec.scoop_rate > spec.reactor_burn * 1.05
+        || (s.companion_dockable() && s.scoop_at(Loc::Companion) * spec.scoop_rate > spec.reactor_burn * 1.05)
+        || s.planets.iter().any(|p| p.scoopable())
 }
 
 /// How far out an ore world can be and still be *usable*: the same margin
@@ -429,20 +477,15 @@ fn max_ore_au(spec: &ShipSpec) -> f64 {
 /// the base test's 1.25x margin: the shuttle round trip to the ore world is
 /// real time in which the fab keeps drawing, and the drones also have to
 /// share with carbon and nitrogen, so the margin must carry both.
-fn system_works_ice(planets: &[super::planet::Planet], spec: &ShipSpec) -> bool {
+fn system_works_ice(sys: &StarSystem, spec: &ShipSpec) -> bool {
     let people = (spec.crew + spec.pax).max(1) as f64;
     let draw = people * (WATER_PER_P_H + O2_PER_P_H * 1.125 + FOOD_PER_P_H * 0.5);
     let mine = spec.drones as f64 * spec.drone_yield;
-    planets
-        .iter()
-        .filter(|p| {
-            p.class.mineable()
-                && p.deposits
-                    .iter()
-                    .any(|d| d.res == Res::Ice && d.tons >= 1000.0)
-        })
-        .any(|p| {
-            let duty = mining_duty(0.25 + p.au * spec.move_time_per_au);
+    ore_sites(sys)
+        .into_iter()
+        .filter(|(_, p)| p.deposits.iter().any(|d| d.res == Res::Ice && d.tons >= 1000.0))
+        .any(|(au, _)| {
+            let duty = mining_duty(0.25 + au * spec.move_time_per_au);
             mine * duty >= draw * 1.25
         })
 }
@@ -454,10 +497,9 @@ fn system_works_ice(planets: &[super::planet::Planet], spec: &ShipSpec) -> bool 
 /// moves on.
 fn system_has_water(gal: &Galaxy, id: u64, max_au: f64) -> bool {
     let s = gal.system_ref(id);
-    let ice = s
-        .planets
-        .iter()
-        .any(|p| p.au <= max_au && p.deposits.iter().any(|d| d.res == Res::Ice && d.tons >= 1000.0));
+    let ice = ore_sites(s)
+        .into_iter()
+        .any(|(au, p)| au <= max_au && p.deposits.iter().any(|d| d.res == Res::Ice && d.tons >= 1000.0));
     let market = s.civ.as_ref().is_some_and(|c| c.tier >= super::civ::CivTier::T2);
     ice || market
 }
@@ -465,10 +507,9 @@ fn system_has_water(gal: &Galaxy, id: u64, max_au: f64) -> bool {
 /// Does this system hold a usable mineable deposit of the ore (1000 t or
 /// more, on a world close enough to work)?
 fn system_mineable_ore(gal: &Galaxy, id: u64, r: Res, max_au: f64) -> bool {
-    gal.system_ref(id)
-        .planets
-        .iter()
-        .any(|p| p.au <= max_au && p.deposits.iter().any(|d| d.res == r && d.tons >= 1000.0))
+    ore_sites(gal.system_ref(id))
+        .into_iter()
+        .any(|(au, p)| au <= max_au && p.deposits.iter().any(|d| d.res == r && d.tons >= 1000.0))
 }
 
 /// Can this system supply a given survival raw — a usable mineable deposit
@@ -641,6 +682,7 @@ impl Sim {
             last_brownout: false,
             committed_ore: None,
             water_return: false,
+            salvage_on: false,
             last_hull_source: "—".into(),
             rng_step: 0,
         };
@@ -702,6 +744,11 @@ impl Sim {
         self.lights = !self.lights;
     }
 
+    pub fn toggle_salvage(&mut self) {
+        self.salvage_on = !self.salvage_on;
+        self.log.push(self.t, Level::Info, format!("Drones set to {}", if self.salvage_on { "salvage wreckage" } else { "mine ore" }));
+    }
+
     pub fn toggle_repair(&mut self) {
         self.repair_on = !self.repair_on;
         self.log.push(self.t, Level::Info, format!("Nanobot repair {}", if self.repair_on { "engaged" } else { "standby" }));
@@ -717,30 +764,29 @@ impl Sim {
         if !self.drone_auto && self.mine_target.is_none() {
             // Default target: biggest deposit on the current planet.
             let sys = gal.system_ref(self.sys_id);
-            if let Loc::Planet(pi) = self.loc
-                && let Some(p) = sys.planets.get(pi) {
-                    let best = p
-                        .deposits
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.tons.total_cmp(&b.1.tons))
-                        .map(|(i, _)| i);
-                    if let Some(bi) = best {
-                        self.mine_target = Some((pi, bi));
-                    }
+            if let Some(p) = sys.site(self.loc) {
+                let best = p
+                    .deposits
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.tons.total_cmp(&b.1.tons))
+                    .map(|(i, _)| i);
+                if let Some(bi) = best {
+                    self.mine_target = Some((self.loc, bi));
                 }
+            }
         }
         self.log.push(self.t, Level::Info, format!("Drone allocation: {}", if self.drone_auto { "automatic (nanobots)" } else { "manual" }));
     }
 
     /// Point the drones at one deposit (manual allocation). Drones only work
     /// it while the ship is docked at that planet.
-    pub fn set_mine_target(&mut self, gal: &Galaxy, planet: usize, deposit: usize) {
+    pub fn set_mine_target(&mut self, gal: &Galaxy, body: Loc, deposit: usize) {
         let sys = gal.system_ref(self.sys_id);
-        let Some(p) = sys.planets.get(planet) else { return };
+        let Some(p) = sys.site(body) else { return };
         let Some(d) = p.deposits.get(deposit) else { return };
         let msg = format!("Drones targeting {} on {}", d.res.name(), p.name);
-        self.mine_target = Some((planet, deposit));
+        self.mine_target = Some((body, deposit));
         if self.drone_auto {
             self.drone_auto = false;
             self.log.push(self.t, Level::Info, "Drone allocation: manual");
@@ -750,18 +796,18 @@ impl Sim {
 
     pub fn cycle_mine_target(&mut self, gal: &Galaxy) {
         let sys = gal.system_ref(self.sys_id);
-        if let Loc::Planet(pi) = self.loc
-            && let Some(p) = sys.planets.get(pi) {
+        let here = self.loc;
+        if let Some(p) = sys.site(here) {
                 if p.deposits.is_empty() {
                     return;
                 }
                 let cur = self
                     .mine_target
-                    .filter(|(p0, _)| *p0 == pi)
+                    .filter(|(p0, _)| *p0 == here)
                     .map(|(_, d)| d)
                     .unwrap_or(usize::MAX);
-                let next = (cur + 1) % p.deposits.len();
-                self.mine_target = Some((pi, next));
+                let next = cur.wrapping_add(1) % p.deposits.len();
+                self.mine_target = Some((here, next));
                 let d = &p.deposits[next];
                 self.log.push(self.t, Level::Info, format!("Drones targeting {} on {}", d.res.name(), p.name));
             }
@@ -863,13 +909,17 @@ impl Sim {
         }
         let spec = self.ship();
         let sys = gal.system_ref(self.sys_id);
-        let au_of = |l: Loc| match l {
-            Loc::Star => 0.0,
-            Loc::Planet(i) => sys.planets.get(i).map(|p| p.au).unwrap_or(1.0),
+        let exists = match to {
+            Loc::Star => true,
+            Loc::Companion => sys.companion_dockable(),
+            _ => sys.site(to).is_some(),
         };
-        // Note: no minimum-distance guard — close-in worlds (au < 0.05) must
-        // still be reachable; the 0.25 h base transfer time covers it.
-        let dist_au = (au_of(self.loc) - au_of(to)).abs();
+        if !exists {
+            return Err(ShuttleBlock::Nowhere);
+        }
+        // Note: no minimum-distance guard — close-in worlds (au < 0.05) and
+        // moon hops must still be reachable; the 0.25 h base leg covers them.
+        let dist_au = sys.dist_au(self.loc, to);
         let t_h = 0.25 + dist_au * spec.move_time_per_au;
         let fuel = dist_au * spec.move_fuel_per_au;
         let taken = self.inv.take(Res::H2, fuel);
@@ -1060,15 +1110,25 @@ impl Sim {
                     }
                     let ds = gal.system(dest_id);
                     let civ_msg = match &ds.civ {
-                        Some(c) => match c.tier {
-                            CivTier::T3 => format!("The {} operate an interstellar resupply station — trade and shipyard services available.", c.name),
-                            CivTier::T2 => format!("The {} are a planetary spacefaring people. A local market may trade some goods.", c.name),
-                            CivTier::T1 => "You observe a pre-space civilization on one world. They do not know you are here.".into(),
-                        },
+                        Some(c) => {
+                            let seat = loc_label(c.seat, ds);
+                            match (c.kind, c.tier) {
+                                (CivKind::Natives, CivTier::T3) => format!("The {} of {seat} run an interstellar station — trade and shipyard services available.", c.name),
+                                (CivKind::Natives, CivTier::T2) => format!("The {} of {seat} are a spacefaring people. Their market may trade some goods.", c.name),
+                                (CivKind::Natives, CivTier::T1) => format!("You observe the {} on {seat}, a pre-space people. They do not know you are here.", c.name),
+                                (CivKind::Colony, CivTier::T3) => format!("{} on {seat} is an industrial colony with a full resupply station and shipyard.", c.name),
+                                (CivKind::Colony, CivTier::T2) => format!("{} on {seat} is a colony with a small market.", c.name),
+                                (CivKind::Colony, CivTier::T1) => format!("{} on {seat} is a fallen colony. The survivors have nothing to trade.", c.name),
+                            }
+                        }
                         None => "No signs of civilization. Just stars, ice and rock.".into(),
                     };
+                    let extra = ds.companion.as_ref().map(|c| format!(" A {} companion, {}, shares the system.", c.layout.name().to_lowercase(), c.star.desc.to_lowercase()));
                     self.log.push(self.t, Level::Good, format!("Arrived at {} ({}) — {:.1} ly traversed. FTL wear {:.0}%, hull −{:.1}.", ds.star.name, ds.star.catalog, dist, self.ftl_wear, wear));
                     self.log.push(self.t, Level::Info, civ_msg);
+                    if let Some(x) = extra {
+                        self.log.push(self.t, Level::Info, x.trim().to_string());
+                    }
                 } else {
                     self.trip = Some(trip);
                 }
@@ -1089,12 +1149,33 @@ impl Sim {
 
         // ---------- long-lived borrow of the current system ----------
         let sys = gal.system(self.sys_id);
-        let star_name = sys.star.name.clone();
-        let star_scoop = sys.star.scoop_base();
-        let star_rad = sys.star.class.radiation();
-        let star_hab = sys.star.habitable_au();
-        let at_star = matches!(self.loc, Loc::Star);
-        let at_planet = matches!(self.loc, Loc::Planet(_));
+        let here = self.loc;
+        let star_name = match here {
+            Loc::Companion => sys.companion.as_ref().map(|c| c.star.name.clone()).unwrap_or_default(),
+            _ => sys.star.name.clone(),
+        };
+        let at_star = here.is_stellar();
+        let at_planet = here.is_body() && sys.site(here).is_some();
+        // Traits of the body the ship is docked at (moons inherit their
+        // parent giant's radiation belts).
+        let parent_rad = here.planet().and_then(|i| sys.planets.get(i)).map(|p| p.radiation()).unwrap_or(0.0);
+        let (body_corrosion, body_shore, body_danger, body_belt, body_rad, body_host, body_au) = match sys.site(here) {
+            Some(p) => (
+                p.corrosion(),
+                p.shore_leave(),
+                p.life.is_some_and(|l| l.dangerous()),
+                match p.belt_feature {
+                    Some(super::planet::BeltFeature::Dust) => 5.0,
+                    _ if p.class == super::planet::PlanetClass::AsteroidBelt => 3.0,
+                    _ => 1.0,
+                },
+                p.radiation().max(parent_rad),
+                p.host,
+                p.au,
+            ),
+            None => (0.0, false, false, 1.0, 0.0, super::planet::Host::A, 0.0),
+        };
+        let infiltrating = sys.site(here).is_some_and(|p| p.atmosphere == Some(super::planet::AtmoKind::Infiltrating));
         let moving = self.shuttle.is_some();
         let tripping = self.trip.is_some();
 
@@ -1143,29 +1224,32 @@ impl Sim {
         if self.scoop_on && !moving && !tripping {
             let base = spec.scoop_rate * if scoop_faulted { 0.5 } else { 1.0 } * brownout;
             if at_star {
-                let rate = base * star_scoop;
+                let rate = base * sys.scoop_at(here);
                 let got = self.inv.add(Res::H2, rate * dt_h);
                 self.stats.scooped += got;
-            } else if let Loc::Planet(pi) = self.loc
-                && let Some(p) = sys.planets.get(pi)
-                    && p.class.scoopable() {
+            } else if let Some(p) = sys.site(here)
+                    && p.scoopable() {
                         let mult = if p.class == super::planet::PlanetClass::GasGiant { 3.5 } else { 1.5 };
-                        let rate = base * mult;
+                        let rate = base * mult * p.gg_feature.map(|f| f.scoop_mult()).unwrap_or(1.0);
                         let h2 = rate * 0.7 * dt_h;
                         let n2 = rate * 0.3 * dt_h;
                         self.stats.scooped += self.inv.add(Res::H2, h2);
                         self.inv.add(Res::Nitrogen, n2);
+                        // Sky life: the scoop strains organics out of the clouds.
+                        if p.life.is_some_and(|l| matches!(l, super::planet::LifeType::SkyEcosystem | super::planet::LifeType::SkyLeviathans)) {
+                            self.inv.add(Res::Carbon, rate * 0.05 * dt_h);
+                        }
                     }
         }
 
         // ---------- mining drones ----------
         if self.mining_on && at_planet && !moving && !tripping {
             let morale_eff = 0.75 + 0.25 * (self.crew.morale.min(100.0) / 100.0);
-            if let Loc::Planet(pi) = self.loc {
-                let p_name = sys.planets.get(pi).map(|p| p.name.clone());
-                let p_class = sys.planets.get(pi).map(|p| p.class);
-                if let (Some(pname), Some(pclass)) = (&p_name, p_class)
-                    && pclass.mineable() && sys.planets[pi].deposits.iter().any(|d| d.tons >= 1.0) {
+            if !self.salvage_on || sys.site(here).is_none_or(|p| p.salvage.as_ref().is_none_or(|s| s.remaining < 1.0)) {
+                let p_name = sys.site(here).map(|p| p.name.clone());
+                let p_mineable = sys.site(here).is_some_and(|p| p.mineable());
+                if let Some(pname) = &p_name
+                    && p_mineable && sys.site(here).is_some_and(|p| p.deposits.iter().any(|d| d.tons >= 1.0)) {
                     let drones = spec.drones as f64 * if drones_faulted { 0.5 } else { 1.0 };
                     let yield_kg = drones * spec.drone_yield * brownout * morale_eff * dt_h;
 
@@ -1174,7 +1258,8 @@ impl Sim {
                     // refills for low tanks. A nearly-empty buffer tank can
                     // never crowd out the crew's actual needs this way.
                     let deposit_idx: Vec<usize> = sys
-                        .planets[pi]
+                        .site(here)
+                        .unwrap()
                         .deposits
                         .iter()
                         .enumerate()
@@ -1182,7 +1267,7 @@ impl Sim {
                         .map(|(di, _)| di)
                         .collect();
                     let alloc: Vec<(usize, f64)> = if self.drone_auto {
-                        let res_of = |di: usize| sys.planets[pi].deposits[di].res;
+                        let res_of = |di: usize| sys.site(here).unwrap().deposits[di].res;
                         let base: Vec<f64> = deposit_idx.iter().map(|&di| self.raw_base(res_of(di))).collect();
                         // Fast lane: a deposit whose ore holds less than a day of fab
                         // draw is refilled to safe (24 h) stock *ahead of* the ordinary
@@ -1281,7 +1366,7 @@ impl Sim {
                         out
                     } else {
                         match self.mine_target {
-                            Some((tp, td)) if tp == pi => vec![(td, drones)],
+                            Some((tp, td)) if tp == here => vec![(td, drones)],
                             _ => vec![],
                         }
                     };
@@ -1290,7 +1375,7 @@ impl Sim {
                         if nd <= 0.0 {
                             continue;
                         }
-                        if let Some(d) = sys.planets[pi].deposits.get_mut(di) {
+                        if let Some(d) = sys.site_mut(here).and_then(|p| p.deposits.get_mut(di)) {
                             if d.tons < 1.0 {
                                 continue;
                             }
@@ -1301,7 +1386,7 @@ impl Sim {
                         }
                     }
 
-                    if sys.planets[pi].exhausted() {
+                    if sys.site(here).is_some_and(|p| p.exhausted()) {
                         self.warn_throttled(
                             &format!("exhausted-{}", self.sys_id),
                             Level::Warn,
@@ -1312,16 +1397,49 @@ impl Sim {
             }
         }
 
+        // ---------- salvage ----------
+        // With salvage switched on, the drones strip wreckage instead of
+        // mining: structural material and metal, now and then something
+        // worth selling.
+        if self.salvage_on && self.mining_on && at_planet && !moving && !tripping {
+            let morale_eff = 0.75 + 0.25 * (self.crew.morale.min(100.0) / 100.0);
+            let drones = spec.drones as f64 * if drones_faulted { 0.5 } else { 1.0 };
+            let rate = drones * spec.drone_yield * 2.0 * brownout * morale_eff * dt_h;
+            let mut found_cr = 0.0;
+            let mut done: Option<String> = None;
+            if let Some(sv) = sys.site_mut(here).and_then(|p| p.salvage.as_mut())
+                && sv.remaining >= 1.0
+            {
+                let kg = rate.min(sv.remaining);
+                sv.remaining -= kg;
+                let mat = self.inv.add(Res::Mat, kg * 0.5);
+                let metal = self.inv.add(Res::Metal, kg * 0.5);
+                self.stats.mined += mat + metal;
+                if rng.random_bool((0.03 * dt_h).min(0.5)) {
+                    found_cr = rng.random_range(80.0..600.0);
+                }
+                if sv.remaining < 1.0 {
+                    done = Some(sv.what.clone());
+                }
+            }
+            if found_cr > 0.0 {
+                self.credits += found_cr;
+                self.log.push(self.t, Level::Good, format!("Salvage crews recovered intact equipment worth {found_cr:.0} cr."));
+            }
+            if let Some(what) = done {
+                self.log.push(self.t, Level::Info, format!("Salvage complete: nothing left worth taking from the {}.", what.to_lowercase()));
+            }
+        }
+
         // ---------- fabrication ----------
         // Can water be replenished — from a world with ice we can mine, or
         // from the ice tank itself (the fab keeps converting it in flight,
         // so board ice *is* renewable water)? If not, the fab defends the
         // emergency water reserve.
         let water_renewable = self.inv.fraction(Res::Ice) > 0.02
-            || matches!(self.loc, Loc::Planet(i)
-                if sys.planets
-                    .get(i)
-                    .is_some_and(|p| p.class.mineable() && p.deposits.iter().any(|d| d.res == Res::Ice && d.tons >= 1.0)));
+            || sys
+                .site(here)
+                .is_some_and(|p| p.mineable() && p.deposits.iter().any(|d| d.res == Res::Ice && d.tons >= 1.0));
         if self.focus != Focus::Idle && brownout > 0.05 {
             let morale_eff = 0.75 + 0.25 * (self.crew.morale.min(100.0) / 100.0);
             // Every non-Idle focus runs the full recipe list in priority
@@ -1558,14 +1676,11 @@ impl Sim {
 
         // ---------- radiation ----------
         let rad = if at_star {
-            star_rad
-        } else if let Loc::Planet(pi) = self.loc {
-            if let Some(p) = sys.planets.get(pi) {
-                let ratio = (p.au / star_hab.max(0.2)).max(0.1);
-                (star_rad * (1.0 / (ratio * ratio))).min(0.6)
-            } else {
-                0.0
-            }
+            sys.star_radiation_at(here)
+        } else if at_planet {
+            let host = sys.host_star(body_host);
+            let ratio = (body_au / host.habitable_au().max(0.2)).max(0.1);
+            (host.radiation() * (1.0 / (ratio * ratio))).min(0.6) + body_rad
         } else {
             0.0
         };
@@ -1579,12 +1694,25 @@ impl Sim {
                 if self.pax.count > 0 {
                     self.pax.health = (self.pax.health - rad * 1.0 * dt_h).max(0.0);
                 }
-                self.warn_throttled("rad", Level::Warn, format!("High radiation from {}. Raise shields or move to a world.", star_name));
+                let src = if body_rad > 0.0 { "the giant's radiation belts".to_string() } else { star_name.clone() };
+                self.warn_throttled("rad", Level::Warn, format!("High radiation from {src}. Raise shields or move away."));
             }
         }
 
         // ---------- micrometeorites + interstellar dust ----------
-        let lam = if tripping { 0.10 } else { 0.05 };
+        // Corrosive air eats the hull while the ship sits in it.
+        if at_planet && !moving && !tripping && body_corrosion > 0.0 {
+            self.hull -= body_corrosion * if self.shields { 0.5 } else { 1.0 } * dt_h;
+            hull_src = Some("corrosive atmosphere");
+            self.warn_throttled("corrode", Level::Warn, "The atmosphere is eating the hull plating. Don't linger.");
+        }
+        let lam = if tripping {
+            0.10
+        } else if at_planet && !moving {
+            0.05 * body_belt
+        } else {
+            0.05
+        };
         let n = poisson(&mut rng, lam * dt_h);
         for _ in 0..n {
             let d = rng.random_range(0.05..0.4);
@@ -1610,6 +1738,24 @@ impl Sim {
             let dur = rng.random_range(2.0..10.0);
             self.faults.push(Fault { kind, until_h: t_h + dur, mat_fix: rng.random_range(5.0..15.0) });
             self.log.push(self.t, Level::Warn, format!("{} — nanobots are on it (feed them MAT to finish sooner).", kind.name()));
+        }
+        // Local hazards: wildlife that tears into the drones, and air that
+        // seeps through every seal into life support.
+        if self.faults.is_empty() && at_planet && !moving && !tripping {
+            let drone_risk = if body_danger && self.mining_on { 0.05 } else { 0.0 };
+            let ls_risk = if infiltrating { 0.05 } else { 0.0 };
+            let kind = if drone_risk > 0.0 && rng.random_bool((drone_risk * dt_h).min(0.5)) {
+                Some((FaultKind::Drones, "Native wildlife attacked the drones"))
+            } else if ls_risk > 0.0 && rng.random_bool((ls_risk * dt_h).min(0.5)) {
+                Some((FaultKind::LifeSupport, "The atmosphere seeped past the seals into life support"))
+            } else {
+                None
+            };
+            if let Some((kind, why)) = kind {
+                let dur = rng.random_range(2.0..10.0);
+                self.faults.push(Fault { kind, until_h: t_h + dur, mat_fix: rng.random_range(5.0..15.0) });
+                self.log.push(self.t, Level::Warn, format!("{why}: {} — nanobots are on it.", kind.name()));
+            }
         }
         let mut cleared = Vec::new();
         self.faults.retain(|f| {
@@ -1647,6 +1793,10 @@ impl Sim {
             && self.inv.fraction(Res::Food) > 0.5
             && self.hull > hmax * 0.5;
         let mut dm = if good { 1.0 } else { -2.0 };
+        // Shore leave: fresh air under an open sky.
+        if body_shore && !moving && !tripping {
+            dm += 1.5;
+        }
         if !self.lights {
             dm -= 0.5;
         }
@@ -1753,9 +1903,9 @@ impl Sim {
             .iter()
             .filter(|&&r| {
                 r != Res::H2
-                    && sys.planets
+                    && ore_sites(sys)
                         .iter()
-                        .any(|p| p.au <= max_au && p.deposits.iter().any(|d| d.res == r && d.tons >= 1000.0))
+                        .any(|(au, p)| *au <= max_au && p.deposits.iter().any(|d| d.res == r && d.tons >= 1000.0))
             })
             .copied()
             .collect();
@@ -1767,39 +1917,39 @@ impl Sim {
         // forever, each jump restarting the ice sawtooth before it could
         // cross the fab's refill gate.
         let ice_sustainable =
-            system_works_ice(&sys.planets, spec) || matches!(civ_tier, Some(CivTier::T3));
-        let at_star = matches!(self.loc, Loc::Star);
-        let planet_idx = match self.loc {
-            Loc::Planet(i) => Some(i),
-            _ => None,
-        };
+            system_works_ice(sys, spec) || matches!(civ_tier, Some(CivTier::T3));
+        let at_star = self.loc.is_stellar();
+        // Every dockable body (planets, moons, belts), indexed together.
+        let sites = sys.sites();
+        let site_locs: Vec<Loc> = sites.iter().map(|(l, _)| *l).collect();
+        let site_au: Vec<f64> = site_locs.iter().map(|l| sys.pos_au(*l)).collect();
+        let planet_idx = site_locs.iter().position(|l| *l == self.loc);
+        let here_rad = sys.site(self.loc).map(|p| p.radiation()).unwrap_or(0.0)
+            + self.loc.planet().and_then(|i| sys.planets.get(i)).map(|p| p.radiation()).unwrap_or(0.0);
 
         self.reactor_pct = 100;
         self.ls_eff = 100;
         self.lights = true;
-        self.shields = sys.star.class.radiation() > 0.05;
+        self.shields = sys.star_radiation_at(Loc::Star) > 0.05 || sys.star_radiation_at(self.loc) > 0.05 || here_rad > 0.0;
         self.drone_auto = true;
+        self.salvage_on = false; // the autopilot lives off ore, not luck
 
         let h2f = self.inv.fraction(Res::H2);
         let fuel_crit = h2f < 0.7; // go hunt for fuel, stop doing everything else
 
         // Scoop anywhere there is atmosphere: at the star, or in a gas/ice
         // giant's envelope (which is far richer).
-        let here_scoopable = planet_idx.is_some_and(|i| {
-            sys.planets
-                .get(i)
-                .is_some_and(|p| p.class.scoopable())
-        });
+        let here_scoopable = planet_idx.is_some_and(|i| sites[i].1.scoopable());
         self.scoop_on = at_star || here_scoopable;
 
         // Best fuel source in the system: the star wind is always available
         // (duty 1); a giant's envelope is richer per hour but costs two
         // transits per visit, so it only wins when it is close in *and* rich.
-        let star_fuel = sys.star.scoop_base() * spec.scoop_rate;
+        let star_fuel = sys.scoop_at(Loc::Star) * spec.scoop_rate;
         let mut fuel_planet: Option<usize> = None;
         let mut fuel_best = star_fuel;
-        for (i, p) in sys.planets.iter().enumerate() {
-            if !p.class.scoopable() {
+        for (i, (_, p)) in sites.iter().enumerate() {
+            if !p.scoopable() {
                 continue;
             }
             let mult = if p.class == super::planet::PlanetClass::GasGiant {
@@ -1807,7 +1957,8 @@ impl Sim {
             } else {
                 1.5
             };
-            let eff = spec.scoop_rate * mult * 0.7 * mining_duty(0.25 + p.au * spec.move_time_per_au);
+            let eff = spec.scoop_rate * mult * 0.7 * p.gg_feature.map(|f| f.scoop_mult()).unwrap_or(1.0)
+                * mining_duty(0.25 + site_au[i] * spec.move_time_per_au);
             if eff > fuel_best {
                 fuel_best = eff;
                 fuel_planet = Some(i);
@@ -1819,7 +1970,7 @@ impl Sim {
         // A "settled" system is a base: fuel AND everything life support
         // needs long-term (water source, food sources, or a market).
         // Everything else is a waypoint — work briefly, then move on.
-        let settled = fuel_sustain && system_can_base(&sys.planets, sys.civ.as_ref(), spec);
+        let settled = fuel_sustain && system_can_base(sys, spec);
 
         // Raw-material need, independent of fuel (fuel strategy is handled by
         // fuel_crit/out_gate separately) — gating it on fuel levels made the
@@ -1918,14 +2069,17 @@ impl Sim {
         // Score every mineable world. A round trip to a world costs transit
         // time in which the fab keeps drawing, so the score is weighted by
         // the duty cycle: a close-in world beats a rich-but-far one.
-        let planet_score: Vec<f64> = sys
-            .planets
+        let planet_score: Vec<f64> = sites
             .iter()
-            .map(|p| {
-                if !p.class.mineable() || p.exhausted() {
+            .enumerate()
+            .map(|(si, (l, p))| {
+                if !p.mineable() || p.exhausted() {
                     return 0.0;
                 }
-                let duty = mining_duty(0.25 + p.au * spec.move_time_per_au);
+                // Hazards: air that eats the hull, a giant's radiation belts.
+                let parent_rad = l.planet().and_then(|i| sys.planets.get(i)).map(|g| g.radiation()).unwrap_or(0.0);
+                let hazard = if p.corrosion() > 0.0 || p.radiation() > 0.0 || parent_rad > 0.0 { 0.3 } else { 1.0 };
+                let duty = mining_duty(0.25 + site_au[si] * spec.move_time_per_au) * hazard;
                 p.deposits
                     .iter()
                     .filter(|d| d.tons >= 1000.0)
@@ -1972,27 +2126,33 @@ impl Sim {
                 // Hunt for fuel: a giant if there is one; otherwise no source
                 // beats the star itself, so just bank the wind here.
                 if let Some(pi) = fuel_planet {
-                    let _ = self.begin_shuttle(gal, Loc::Planet(pi));
+                    let _ = self.begin_shuttle(gal, site_locs[pi]);
                 }
-            } else if need_mine && h2f > out_gate {
+            } else if need_mine && (h2f > out_gate || (most_critical.is_some() && h2f > 0.45)) {
                 // A sortie is always worth taking: a ship that is not ready to
                 // jump gains its departure buffers from the very mining the
                 // sortie does, and a ready ship launches from wherever it
-                // happens to be standing still.
+                // happens to be standing still. With an ore critical, the
+                // sortie can't wait for a comfortable fuel margin.
                 if let Some(pi) = best_planet {
-                    let _ = self.begin_shuttle(gal, Loc::Planet(pi));
+                    let _ = self.begin_shuttle(gal, site_locs[pi]);
                 }
+            } else if let Some(fp) = fuel_planet {
+                // A dim star's wind barely outpaces the reactor: waiting here
+                // for the fuel gate is how a ship once stood at a red dwarf
+                // until the crew died of thirst. Fill up at the giant instead.
+                let _ = self.begin_shuttle(gal, site_locs[fp]);
             }
         } else if let Some(pi) = planet_idx {
-            let p = &sys.planets[pi];
-            let is_fuel = p.class.scoopable();
+            let p = sites[pi].1;
+            let is_fuel = p.scoopable();
             // Hysteresis: the ship keeps working its current world while it
             // is within 1.5x of the best world's score. Without the band,
             // two similar worlds (e.g. two ice giants) would score in and out
             // of the top spot as tanks tick, and the ship would shuttle
             // between them forever without mining.
             let cur_score = planet_score.get(pi).copied().unwrap_or(0.0);
-            let useful_mine = p.class.mineable()
+            let useful_mine = p.mineable()
                 && !p.exhausted()
                 && (best_planet.is_some_and(|i| i == pi) || cur_score * 1.5 >= best_score);
             if fuel_crit {
@@ -2004,17 +2164,17 @@ impl Sim {
                     // wind is several times richer.
                     if let Some(fp) = fuel_planet
                         .filter(|fp| *fp != pi)
-                        && sys.planets[fp].class == super::planet::PlanetClass::GasGiant
+                        && sites[fp].1.class == super::planet::PlanetClass::GasGiant
                             && p.class == super::planet::PlanetClass::IceGiant
                         {
-                            let _ = self.begin_shuttle(gal, Loc::Planet(fp));
+                            let _ = self.begin_shuttle(gal, site_locs[fp]);
                         }
                 } else {
                     // No atmosphere here: to the fuel source, or back to the
                     // star to bank whatever wind there is.
                     match fuel_planet {
                         Some(fp) => {
-                            let _ = self.begin_shuttle(gal, Loc::Planet(fp));
+                            let _ = self.begin_shuttle(gal, site_locs[fp]);
                         }
                         None => {
                             let _ = self.begin_shuttle(gal, Loc::Star);
@@ -2030,7 +2190,7 @@ impl Sim {
                 if h2f > 0.85 && (!useful_mine || !need_mine) {
                     match best_planet {
                         Some(bp) if bp != pi => {
-                            let _ = self.begin_shuttle(gal, Loc::Planet(bp));
+                            let _ = self.begin_shuttle(gal, site_locs[bp]);
                         }
                         _ => {
                             let _ = self.begin_shuttle(gal, Loc::Star);
@@ -2443,7 +2603,7 @@ impl Sim {
                             reachable(n.dist_ly)
                                 && (system_can_settle(gal, n.id, spec)
                                     || n.civ == Some(CivTier::T3)
-                                    || system_works_ice(&gal.system_ref(n.id).planets, spec))
+                                    || system_works_ice(gal.system_ref(n.id), spec))
                         } else {
                             fresh(n)
                                 && system_can_settle(gal, n.id, spec)
@@ -2713,7 +2873,7 @@ mod fix_tests {
         let id = sim.sys_id;
         {
             let sys = gal.system(id);
-            sys.civ = Some(super::super::civ::Civ { tier: CivTier::T3, name: "Test".into() });
+            sys.civ = Some(super::super::civ::Civ { tier: CivTier::T3, name: "Test".into(), kind: CivKind::Colony, seat: Loc::Planet(0), small: false });
             sys.trade_stock.insert(Res::Water, 10_000.0);
             sys.trade_prices.insert(Res::Water, 1.0);
         }
@@ -2728,5 +2888,35 @@ mod fix_tests {
         sim.trade(&mut gal, Res::Water, true, 100.0);
         assert_eq!(sim.stats.trades, trades);
         assert!(sim.log.entries.back().unwrap().msg.contains("full"));
+    }
+}
+
+#[cfg(test)]
+mod base_rarity {
+    use super::*;
+
+    /// Most systems are waypoints, not bases — the core of the survival
+    /// loop. Under the previous generator about 13% of systems could
+    /// sustain a ship; the detailed generator must stay in the same regime
+    /// (±50%).
+    #[test]
+    fn bases_stay_rare() {
+        for ship in 0..3 {
+            let spec = ShipSpec::spec(ship);
+            let (mut n, mut base) = (0, 0);
+            let mut gal = Galaxy::new(2);
+            for cx in -18..18 {
+                for cy in -18..18 {
+                    for id in gal.ids_in_cell(cx, cy) {
+                        n += 1;
+                        if system_can_base(gal.system(id), spec) {
+                            base += 1;
+                        }
+                    }
+                }
+            }
+            let f = base as f64 / n as f64;
+            assert!((0.065..=0.20).contains(&f), "ship {ship}: base fraction {f:.3}");
+        }
     }
 }

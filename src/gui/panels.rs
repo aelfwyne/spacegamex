@@ -75,6 +75,10 @@ pub fn controls(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
                     acts.push(Action::ToggleDroneAuto);
                 }
                 toggle(ui, sim.repair_on, "Repair", "X in Systems", Action::ToggleRepair, acts);
+                let sys = app.gal.system_ref(sim.sys_id);
+                if sys.site(sim.loc).is_some_and(|p| p.salvage.as_ref().is_some_and(|s| s.remaining >= 1.0)) {
+                    toggle(ui, sim.salvage_on, "Salvage", "V", Action::ToggleSalvage, acts);
+                }
                 toggle(ui, sim.lights, "Lights", "O in Systems", Action::ToggleLights, acts);
             });
             ui.horizontal(|ui| {
@@ -206,25 +210,72 @@ fn kv(ui: &mut Ui, k: &str, v: RichText) {
 
 // ------------------------------------------------------------ planet
 
+/// Gameplay consequences of a body's traits, in plain words.
+fn hazards(sys: &crate::sim::system::StarSystem, loc: Loc, p: &crate::sim::planet::Planet) -> Vec<(String, Color32)> {
+    use crate::sim::planet::{BeltFeature, LifeType, PlanetClass};
+    let mut v: Vec<(String, Color32)> = Vec::new();
+    if p.corrosion() > 0.0 {
+        v.push((format!("Corrosive air: hull −{:.1}/h while docked (halved with shields up).", p.corrosion()), BAD));
+    }
+    if p.atmosphere == Some(crate::sim::planet::AtmoKind::Infiltrating) {
+        v.push(("Infiltrating air seeps past seals: life-support faults are likely while docked.".into(), BAD));
+    }
+    let parent_rad = loc.planet().and_then(|i| sys.planets.get(i)).map(|g| g.radiation()).unwrap_or(0.0);
+    if p.radiation() > 0.0 || (p.is_moon && parent_rad > 0.0) {
+        v.push(("Inside a giant's radiation belts: hull and crew damage unless shields are up.".into(), WARN));
+    }
+    if p.shore_leave() {
+        v.push(("Breathable air and a livable climate: shore leave lifts crew morale while docked.".into(), GOOD));
+    }
+    if p.life.is_some_and(|l| l.dangerous()) {
+        v.push(("Dangerous wildlife: drone faults are three times as likely while mining here.".into(), WARN));
+    }
+    if p.life.is_some_and(|l| l.biomass()) {
+        v.push(("Living biomass: carbon and nitrogen to harvest.".into(), GOOD));
+    }
+    if let Some(f) = p.gg_feature
+        && f.scoop_mult() < 1.0 {
+            v.push((format!("{}: scoop yield ×{:.2}.", f.name(), f.scoop_mult()), WARN));
+        }
+    if p.life.is_some_and(|l| matches!(l, LifeType::SkyEcosystem | LifeType::SkyLeviathans)) {
+        v.push(("Sky life: the scoop also strains out a little carbon.".into(), GOOD));
+    }
+    if p.class == PlanetClass::AsteroidBelt {
+        let k = if p.belt_feature == Some(BeltFeature::Dust) { 5 } else { 3 };
+        v.push((format!("Debris: micrometeorite strikes ×{k} while working the belt."), WARN));
+    }
+    if p.scoopable() {
+        v.push(("Scoopable envelope: H2 and N2 for the tanks.".into(), ACCENT));
+    }
+    v
+}
+
 pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
+    use crate::sim::planet::{Host, PlanetClass};
+    use crate::sim::worldgen::life::fmt_population;
     let sim = app.sim();
     let sys = app.gal.system_ref(sim.sys_id);
-    back_row(ui, "PLANET", acts);
+    back_row(ui, "WORLDS", acts);
     if sys.planets.is_empty() {
-        ui.label("This system has no planets.");
+        ui.label("This system has no planets, moons or belts — only the star.");
         return;
     }
     let pi = app.sel_planet.min(sys.planets.len() - 1);
-    let p = &sys.planets[pi];
-    let at = matches!(sim.loc, Loc::Planet(i) if i == pi);
+    let loc = match app.sel_moon {
+        Some(m) if sys.planets[pi].satellites.get(m).is_some() => Loc::Moon(pi, m),
+        _ => Loc::Planet(pi),
+    };
+    let Some(p) = sys.site(loc) else { return };
+    let at = sim.loc == loc;
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button("◀ Prev  [←]").clicked() {
             acts.push(Action::StepPlanet(-1));
         }
         for (i, q) in sys.planets.iter().enumerate() {
             let short = q.name.rsplit(' ').next().unwrap_or(&q.name).to_string();
-            if ui.selectable_label(i == pi, short).on_hover_text(&q.name).clicked() {
+            let short = if q.host == Host::B { format!("B-{short}") } else { short };
+            if ui.selectable_label(i == pi && app.sel_moon.is_none(), short).on_hover_text(format!("{} — {}", q.name, q.kind_label())).clicked() {
                 acts.push(Action::SelectPlanet(i));
             }
         }
@@ -232,6 +283,22 @@ pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
             acts.push(Action::StepPlanet(1));
         }
     });
+    let parent = &sys.planets[pi];
+    if !parent.satellites.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(dim(format!("Moons of {}:", parent.name)));
+            for (m, moon) in parent.satellites.iter().enumerate() {
+                let tag = moon.name.rsplit(' ').next().unwrap_or("?").to_string();
+                let mut t = RichText::new(tag);
+                if moon.natives.is_some() || moon.colony.is_some() {
+                    t = t.color(CIV);
+                }
+                if ui.selectable_label(app.sel_moon == Some(m), t).on_hover_text(format!("{} — {}", moon.name, moon.kind_label())).clicked() {
+                    acts.push(Action::SelectBody(Loc::Moon(pi, m)));
+                }
+            }
+        });
+    }
     ui.add_space(6.0);
 
     ui.horizontal_top(|ui| {
@@ -239,13 +306,14 @@ pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
         let side = 260.0;
         let (resp, painter) = ui.allocate_painter(vec2(side, side), Sense::hover());
         let r = resp.rect;
-        paint::starfield(&painter, r, crate::gui::paint::seed_of(&p.name), 2.0, view.anim_t as f32);
-        let pr = side * 0.36;
+        paint::starfield(&painter, r, paint::seed_of(&p.name), 2.0, view.anim_t as f32);
         let t = view.anim_t as f32;
+        let pr = if p.class == PlanetClass::GasGiant || p.class == PlanetClass::IceGiant { side * 0.3 } else { side * 0.36 };
         paint::planet(&painter, r.center(), pr, p, vec2(-0.8, -0.4), t * 0.08);
-        for m in 0..p.moons.min(6) {
+        let moon_n = if p.satellites.is_empty() { p.moons } else { p.satellites.len() };
+        for m in 0..moon_n.min(6) {
             let ang = t * (0.3 + m as f32 * 0.11) + m as f32 * 1.7;
-            let orb = pr + 14.0 + m as f32 * 7.0;
+            let orb = pr * if p.ring { 2.35 } else { 1.0 } + 14.0 + m as f32 * 7.0;
             let mp = r.center() + vec2(ang.cos() * orb, ang.sin() * orb * 0.35);
             let behind = ang.sin() < 0.0;
             if !behind || mp.distance(r.center()) > pr {
@@ -254,28 +322,72 @@ pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
         }
 
         ui.vertical(|ui| {
-            ui.label(RichText::new(format!("{} — {}", p.name, p.class.name())).strong().size(19.0));
+            ui.label(RichText::new(format!("{} — {}", p.name, p.kind_label())).strong().size(19.0));
+            if let Loc::Moon(i, _) = loc
+                && ui.small_button(format!("↑ {}", sys.planets[i].name)).clicked() {
+                    acts.push(Action::SelectPlanet(i));
+                }
             egui::Grid::new("pfacts").num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
-                kv(ui, "Orbit", format!("{} AU  (period {:.1} yr)", fmt_f1(p.au), p.period).into());
-                kv(ui, "Mass / radius", format!("{:.2} M⊕ / {:.2} R⊕", p.mass, p.radius).into());
-                kv(ui, "Gravity", format!("{:.2} g", p.gravity).into());
-                kv(ui, "Temperature", format!("{:.0} K", p.temp).into());
-                kv(ui, "Composition", p.bulk.clone().into());
-                kv(ui, "Moons", format!("{}", p.moons).into());
-                kv(ui, "Atmosphere", p.atmo.as_ref().map(|a| a.describe()).unwrap_or_else(|| "none (hard vacuum)".into()).into());
+                let host = sys.host_star(p.host);
+                let orbit = if p.host == Host::AB {
+                    format!("{} AU around both stars (period {:.2} yr)", fmt_f1(p.au), p.period)
+                } else {
+                    format!("{} AU from {} (period {:.2} yr)", fmt_f1(p.au), host.name, p.period)
+                };
+                kv(ui, "Orbit", orbit.into());
+                if p.class != PlanetClass::AsteroidBelt {
+                    kv(ui, "Size", format!("{:.0} km  ·  {:.2} M⊕  ·  {:.2} g", p.size_km, p.mass, p.gravity).into());
+                    if matches!(p.class, PlanetClass::GasGiant | PlanetClass::IceGiant) {
+                        kv(ui, "Temperature", format!("{:.0} K at the cloud tops", p.temp).into());
+                    } else {
+                        kv(ui, "Temperature", format!("{} ({}) — {:.0} K", p.temp_band.name(), p.temp_band.range(), p.temp).into());
+                    }
+                    if let Some(a) = p.atmosphere {
+                        let pressure = p.atmo.as_ref().map(|x| format!(", {:.2} bar", x.pressure_bar)).unwrap_or_default();
+                        kv(ui, "Atmosphere", format!("{}{pressure}", a.describe()).into());
+                    } else if !matches!(p.class, PlanetClass::GasGiant | PlanetClass::IceGiant) {
+                        kv(ui, "Atmosphere", "none (hard vacuum)".to_string().into());
+                    }
+                    if let Some(g) = p.geosphere {
+                        kv(ui, "Geosphere", g.name().to_string().into());
+                    }
+                    kv(ui, "Composition", p.bulk.clone().into());
+                }
+                if !p.surface.is_empty() {
+                    kv(ui, "Surface", p.surface.clone().into());
+                }
+                if let Some(f) = p.gg_feature {
+                    kv(ui, "Feature", f.name().to_string().into());
+                }
+                if let Some(f) = p.belt_feature {
+                    kv(ui, "Feature", f.name().to_string().into());
+                }
+                let mut sat = Vec::new();
+                if moon_n > 0 {
+                    sat.push(format!("{moon_n} moon{}", if moon_n == 1 { "" } else { "s" }));
+                }
+                if p.ring {
+                    sat.push("ring".into());
+                }
+                if !sat.is_empty() {
+                    kv(ui, "In orbit", sat.join(", ").into());
+                }
+                if p.tidally_locked {
+                    kv(ui, "Rotation", RichText::new("Tidally locked").color(WARN));
+                }
             });
-            let hab = (0.5..2.2).contains(&(p.au / sys.star.habitable_au()));
-            if hab && p.class.mineable() {
-                ui.label(RichText::new("within the habitable zone").color(GOOD));
-            }
-            if p.class.scoopable() {
-                ui.label(RichText::new("Atmospheric scoop works here (H2 + N2)").color(ACCENT));
+            if !p.terrain.is_empty() {
+                ui.add_space(4.0);
+                ui.label(dim("Terrain"));
+                for t in &p.terrain {
+                    ui.label(format!("•  {t}"));
+                }
             }
             ui.add_space(6.0);
             let dock = if at {
                 RichText::new("DOCKED").color(GOOD).strong()
             } else if let Some(leg) = &sim.shuttle {
-                if matches!(leg.to, Loc::Planet(i) if i == pi) {
+                if leg.to == loc {
                     RichText::new(format!("shuttling here — {} left", fmt_hours(leg.remaining_h))).color(WARN)
                 } else {
                     RichText::new("shuttling elsewhere").color(WARN)
@@ -288,31 +400,112 @@ pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
             ui.horizontal(|ui| {
                 ui.label(dock);
                 if !at && ui.button("Shuttle here  [S]").clicked() {
-                    acts.push(Action::ShuttleTo(Loc::Planet(pi)));
+                    acts.push(Action::ShuttleTo(loc));
                 }
                 if at && ui.button("Return to star").clicked() {
                     acts.push(Action::ShuttleTo(Loc::Star));
                 }
             });
-            if p.class.mineable() {
+            if p.mineable() {
                 ui.horizontal(|ui| {
-                    toggle(ui, sim.mining_on, "Mining", "2", Action::ToggleMining, acts);
+                    toggle(ui, sim.mining_on, "Drones", "2", Action::ToggleMining, acts);
                     if ui.selectable_label(!sim.drone_auto, if sim.drone_auto { "Allocation: auto" } else { "Allocation: manual" })
                         .on_hover_text("[A] toggles. Manual: pick a deposit below.")
                         .clicked()
                     {
                         acts.push(Action::ToggleDroneAuto);
                     }
-                    ui.label(dim(if at && sim.mining_on { "drones working" } else { "drones idle" }));
+                    ui.label(dim(if at && sim.mining_on { if sim.salvage_on { "drones salvaging" } else { "drones mining" } } else { "drones idle" }));
                 });
             }
         });
     });
 
+    // ---- hazards & effects ----
+    let hz = hazards(sys, loc, p);
+    if !hz.is_empty() {
+        ui.add_space(8.0);
+        section(ui, "CONDITIONS");
+        for (t, col) in hz {
+            ui.label(RichText::new(format!("•  {t}")).color(col));
+        }
+    }
+
+    // ---- life & people ----
+    if p.life.is_some() || p.natives.is_some() || p.colony.is_some() || !p.settlers.is_empty() {
+        ui.add_space(8.0);
+        section(ui, "LIFE & PEOPLE");
+        if let Some(l) = p.life {
+            ui.label(RichText::new(l.name()).strong().color(GOOD));
+            ui.label(dim(l.description()));
+        }
+        if let Some(n) = &p.natives {
+            ui.add_space(4.0);
+            if n.tech == crate::sim::planet::NativeTech::ExtinctRuins {
+                ui.label(RichText::new(format!("Ruins of the {}", n.species)).strong().color(DIM));
+                ui.label(dim("A civilisation evolved here and is gone. Only its ruins remain."));
+            } else {
+                ui.label(RichText::new(format!("The {} — {}", n.species, n.tech.name())).strong().color(CIV));
+                egui::Grid::new("natives").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
+                    if n.species_count > 1 {
+                        kv(ui, "Species", format!("{} sentient species evolved here", n.species_count).into());
+                    }
+                    kv(ui, "Population", fmt_population(n.population).into());
+                    kv(ui, "Politics", n.factions.clone().into());
+                    kv(ui, "Power", n.dominant_power.clone().into());
+                    if !n.in_orbit.is_empty() {
+                        kv(ui, "In orbit", n.in_orbit.clone().into());
+                    }
+                    if !n.relations.is_empty() {
+                        kv(ui, "Toward the colony", n.relations.clone().into());
+                    }
+                });
+            }
+        }
+        if !p.settlers.is_empty() {
+            ui.label(RichText::new(format!("Settled by: {}", p.settlers.join(", "))).color(CIV));
+        }
+        if let Some(cl) = &p.colony {
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("{} — {}", cl.name, cl.tech.name())).strong().color(super::sysview::COLONY_COL));
+            egui::Grid::new("colony").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
+                kv(ui, "Founded by", format!("the {}", cl.founders).into());
+                kv(ui, "Size", cl.size.clone().into());
+                kv(ui, "Population", fmt_population(cl.population).into());
+                if !cl.missions.is_empty() {
+                    kv(ui, "Missions", cl.missions.clone().into());
+                }
+                if !cl.factions.is_empty() {
+                    kv(ui, "Factions", format!("{} — {}", cl.factions, cl.faction_type).into());
+                }
+                if !cl.in_orbit.is_empty() {
+                    kv(ui, "In orbit", cl.in_orbit.clone().into());
+                }
+            });
+        }
+    }
+
+    // ---- salvage ----
+    if let Some(sv) = &p.salvage {
+        ui.add_space(8.0);
+        section(ui, "SALVAGE");
+        ui.label(&sv.what);
+        ui.horizontal(|ui| {
+            bar_colored(ui, sv.remaining / sv.initial.max(1.0), format!("{:.0} t left", sv.remaining / 1000.0), 220.0, WARN);
+            if sv.remaining >= 1.0 {
+                let r = ui.add_enabled(at, egui::Button::selectable(sim.salvage_on, if sim.salvage_on { "Salvaging  [V]" } else { "Salvage  [V]" }));
+                if r.on_disabled_hover_text("Dock here first.").clicked() {
+                    acts.push(Action::ToggleSalvage);
+                }
+            }
+        });
+        ui.label(dim("With salvage on, the drones strip wreckage for structural material and metal instead of mining — and now and then turn up something worth selling."));
+    }
+
     ui.add_space(8.0);
     section(ui, "DEPOSITS");
     if p.deposits.is_empty() {
-        ui.label(dim("No solid deposits — scoopable atmosphere only."));
+        ui.label(dim(if p.scoopable() { "No solid deposits — scoopable atmosphere only." } else { "No usable deposits." }));
         return;
     }
     egui::Grid::new("deps").num_columns(5).striped(true).spacing([18.0, 4.0]).show(ui, |ui| {
@@ -321,7 +514,7 @@ pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
         }
         ui.end_row();
         for (di, d) in p.deposits.iter().enumerate() {
-            let targeted = !sim.drone_auto && sim.mine_target == Some((pi, di));
+            let targeted = !sim.drone_auto && sim.mine_target == Some((loc, di));
             ui.label(RichText::new(d.res.short()).monospace().color(c(d.res.color())));
             ui.label(d.res.name());
             ui.label(format!("{:.0} t", d.tons));
@@ -335,9 +528,9 @@ pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
                 ("available", DIM)
             };
             ui.label(RichText::new(st).color(col));
-            if d.tons >= 1.0 && p.class.mineable() && !targeted {
+            if d.tons >= 1.0 && p.mineable() && !targeted {
                 if ui.small_button("Target").on_hover_text("Switch drones to manual and mine this").clicked() {
-                    acts.push(Action::SetMineTarget(pi, di));
+                    acts.push(Action::SetMineTarget(loc, di));
                 }
             } else {
                 ui.label("");
@@ -349,7 +542,25 @@ pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
 
 // ------------------------------------------------------------ star
 
+fn star_facts(ui: &mut Ui, id: &str, s: &crate::sim::star::Star) {
+    let rad = s.radiation();
+    egui::Grid::new(id).num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
+        kv(ui, "Type", format!("{} ({})", s.desc, s.code).into());
+        kv(ui, "Mass", format!("{:.2} M☉", s.mass).into());
+        kv(ui, "Radius", format!("{:.3} R☉", s.radius).into());
+        kv(ui, "Luminosity", format!("{:.4} L☉", s.lum).into());
+        kv(ui, "Surface temp", format!("{:.0} K", s.temp).into());
+        kv(ui, "Age", format!("{:.1} Gyr", s.age).into());
+        kv(ui, "Metallicity", format!("{:+.2} dex", s.metallicity).into());
+        kv(ui, "Habitable zone", format!("~{:.2} AU", s.habitable_au()).into());
+        kv(ui, "Scoop yield", format!("×{:.2} base", s.scoop_base()).into());
+        let (lbl, col) = if rad > 0.5 { ("DANGEROUS", BAD) } else if rad > 0.2 { ("elevated", WARN) } else { ("low", GOOD) };
+        kv(ui, "Radiation", RichText::new(format!("{lbl} ({rad:.2})")).color(col));
+    });
+}
+
 pub fn star(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
+    use crate::sim::planet::Host;
     let sim = app.sim();
     let sys = app.gal.system_ref(sim.sys_id);
     let s = &sys.star;
@@ -358,25 +569,15 @@ pub fn star(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
         let side = 260.0;
         let (resp, painter) = ui.allocate_painter(vec2(side, side), Sense::hover());
         paint::starfield(&painter, resp.rect, sys.id ^ 0x5, 1.5, view.anim_t as f32);
-        let r = (40.0 + 18.0 * (1.0 + s.radius as f32).ln()).min(side * 0.3);
-        paint::star(&painter, resp.rect.center(), r, s.class.color(), view.anim_t as f32);
-
+        let r = paint::star_px(s, 60.0).min(side * 0.32);
+        paint::star_of(&painter, resp.rect.center(), r, s, view.anim_t as f32);
+        if let Some(cp) = &sys.companion {
+            let rb = paint::star_px(&cp.star, 26.0).min(side * 0.14);
+            paint::star_of(&painter, resp.rect.right_top() + vec2(-rb - 18.0, rb + 18.0), rb, &cp.star, view.anim_t as f32);
+        }
         ui.vertical(|ui| {
             ui.label(RichText::new(format!("{}  ({})", s.name, s.catalog)).strong().size(19.0).color(c(s.class.color())));
-            let rad = s.class.radiation();
-            egui::Grid::new("sfacts").num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
-                kv(ui, "Class", format!("{}{}", s.class.class_name(), if s.giant { " — giant" } else { "" }).into());
-                kv(ui, "Mass", format!("{:.2} M☉", s.mass).into());
-                kv(ui, "Radius", format!("{:.2} R☉", s.radius).into());
-                kv(ui, "Luminosity", format!("{:.2} L☉", s.lum).into());
-                kv(ui, "Surface temp", format!("{:.0} K", s.temp).into());
-                kv(ui, "Age", format!("{:.1} Gyr", s.age).into());
-                kv(ui, "Metallicity", format!("{:+.2} dex", s.metallicity).into());
-                kv(ui, "Habitable zone", format!("~{} AU", fmt_f1(s.habitable_au())).into());
-                kv(ui, "Scoop yield", format!("×{:.2} base", s.scoop_base()).into());
-                let (lbl, col) = if rad > 0.5 { ("DANGEROUS", BAD) } else if rad > 0.2 { ("elevated", WARN) } else { ("low", GOOD) };
-                kv(ui, "Radiation", RichText::new(format!("{lbl} ({rad:.2})")).color(col));
-            });
+            star_facts(ui, "sfacts", s);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if matches!(sim.loc, Loc::Star) && sim.shuttle.is_none() {
@@ -387,7 +588,7 @@ pub fn star(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
             });
             if let Some(cv) = &sys.civ {
                 ui.add_space(6.0);
-                ui.label(RichText::new(format!("{} — {}", cv.name, cv.tier.name())).color(CIV).strong());
+                ui.label(RichText::new(format!("{} on {} — {}", cv.display(), crate::sim::state::loc_label(cv.seat, sys), cv.tier.name())).color(CIV).strong());
                 if cv.tier != CivTier::T1 && ui.button("Open trade  [K]").clicked() {
                     acts.push(Action::Open(Screen::Trade));
                 }
@@ -396,18 +597,58 @@ pub fn star(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
             }
         });
     });
+    if let Some(cp) = &sys.companion {
+        ui.add_space(8.0);
+        section(ui, &format!("COMPANION — {} BINARY", cp.layout.name().to_uppercase()));
+        ui.label(dim(cp.layout.description()));
+        ui.horizontal_top(|ui| {
+            star_facts(ui, "bfacts", &cp.star);
+            egui::Grid::new("binfacts").num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
+                kv(ui, "Name", cp.star.name.clone().into());
+                kv(ui, "Separation", format!("{:.2} AU (e = {:.2})", cp.separation_au, cp.ecc).into());
+                kv(ui, "Mass ratio", format!("{:.2}", cp.mass_ratio).into());
+                if cp.p_type {
+                    kv(ui, "Planets", format!("circle both stars beyond {:.2} AU", cp.circumbinary).into());
+                } else {
+                    kv(ui, "Stable zone A", format!("out to {:.2} AU", cp.limit_a).into());
+                    kv(ui, "Stable zone B", format!("out to {:.2} AU", cp.limit_b).into());
+                }
+            });
+        });
+        if sys.companion_dockable() {
+            if sim.loc == Loc::Companion {
+                ui.label(RichText::new("DOCKED AT THE COMPANION — the fuel scoop works here").color(GOOD));
+            } else if ui.button(format!("Shuttle to {} ({:.1} AU)", cp.star.name, sys.dist_au(sim.loc, Loc::Companion))).clicked() {
+                acts.push(Action::ShuttleTo(Loc::Companion));
+            }
+        }
+    }
     ui.add_space(8.0);
     section(ui, "WORLDS");
-    egui::Grid::new("worlds").num_columns(5).striped(true).spacing([18.0, 3.0]).show(ui, |ui| {
+    egui::Grid::new("worlds").num_columns(6).striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
         for (i, p) in sys.planets.iter().enumerate() {
-            let here = matches!(sim.loc, Loc::Planet(j) if j == i);
+            let here = sim.loc.planet() == Some(i);
             ui.label(if here { RichText::new("◉").color(GOOD) } else { dim("●") });
-            if ui.selectable_label(i == app.sel_planet, &p.name).on_hover_text("open planet").clicked() {
+            if ui.selectable_label(i == app.sel_planet, &p.name).on_hover_text("open").clicked() {
                 acts.push(Action::SelectPlanet(i));
                 acts.push(Action::Open(Screen::Planet));
             }
-            ui.label(p.class.name());
-            ui.label(format!("{:.2} AU", p.au));
+            ui.label(p.kind_label());
+            ui.label(format!("{:.2} AU{}", p.au, if p.host == Host::B { " (B)" } else { "" }));
+            let mut notes: Vec<String> = Vec::new();
+            if !p.satellites.is_empty() {
+                notes.push(format!("{} moons", p.satellites.len()));
+            }
+            if let Some(l) = p.life {
+                notes.push(l.name().to_lowercase());
+            }
+            if p.natives.is_some() || p.satellites.iter().any(|m| m.natives.is_some()) {
+                notes.push("natives".into());
+            }
+            if p.colony.is_some() || p.satellites.iter().any(|m| m.colony.is_some()) {
+                notes.push("colony".into());
+            }
+            ui.label(dim(notes.join(", ")));
             ui.label(dim(format!("{} deposits", p.deposits.iter().filter(|d| d.tons >= 1.0).count())));
             ui.end_row();
         }
@@ -614,7 +855,8 @@ pub fn trade(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         return;
     };
     let t3 = cv.tier == CivTier::T3;
-    ui.label(RichText::new(format!("{} — {}", cv.name, cv.tier.name())).color(CIV).strong().size(17.0));
+    ui.label(RichText::new(format!("{} — {}", cv.display(), cv.tier.name())).color(CIV).strong().size(17.0));
+    ui.label(dim(format!("Seat: {}{}", crate::sim::state::loc_label(cv.seat, sys), if cv.small { " (small outpost market)" } else { "" })));
     ui.label(dim(if t3 {
         "Full interstellar station: buy and sell anything; shipyard hull repair at 8 cr per hull point."
     } else if cv.tier == CivTier::T2 {
@@ -700,7 +942,8 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     }
     ui.add_space(8.0);
     section(ui, "MOUSE");
-    ui.label("System view: click a world to select it, double-click a world or the star to shuttle there.");
+    ui.label("System view: click a world or moon to select it, double-click to shuttle there. Drag to pan, scroll to zoom; zoom in (or select a giant) to see its moons.");
+    ui.label("Binary systems: the view buttons frame star A, star B or both; a wide companion is a second star you can shuttle to and scoop.");
     ui.label("Star map: drag to pan, scroll to zoom, click to select, double-click to set the destination.");
     ui.add_space(8.0);
     section(ui, "KEYS");
@@ -717,6 +960,7 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         ("C / R", "crew · resources"),
         ("F", "time compression 1x → 10x → 60x → 600x → pause"),
         ("X", "skip to arrival during FTL (works while paused)"),
+        ("V", "drones salvage wreckage instead of mining (where there is any)"),
         ("G / Q", "save · save and quit"),
         ("H / Esc", "help · back"),
     ];

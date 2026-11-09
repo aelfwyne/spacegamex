@@ -125,7 +125,12 @@ fn chart(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
         let col = c(n.class.color());
         paint::glow(&painter, p, base * 0.6, base * 3.5, col, 0.35);
         painter.circle_filled(p, base, col);
+        if n.binary {
+            // A companion star: a second, smaller dot alongside.
+            painter.circle_filled(p + vec2(base + 2.5, -base * 0.6), (base * 0.55).max(1.6), col.gamma_multiply(0.85));
+        }
         if let Some(cc) = civ_color(n.civ) {
+            let cc = if n.civ_kind == Some(crate::sim::civ::CivKind::Colony) { super::sysview::COLONY_COL } else { cc };
             painter.circle_stroke(p, base + 4.0, Stroke::new(1.5, cc));
         }
         let visited = sim.visited.contains(&n.id);
@@ -157,7 +162,7 @@ fn chart(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     // Legend.
     let lg = rect.left_bottom() + vec2(10.0, -10.0);
     painter.text(lg, Align2::LEFT_BOTTOM, "drag: pan   wheel: zoom   click: select   double-click: set destination", FontId::proportional(11.5), DIM);
-    painter.text(lg + vec2(0.0, -16.0), Align2::LEFT_BOTTOM, "rings: magenta = interstellar civ (trade)   cyan = planetary civ   grey = pre-space", FontId::proportional(11.5), DIM);
+    painter.text(lg + vec2(0.0, -16.0), Align2::LEFT_BOTTOM, "rings: magenta = interstellar natives   cyan = spacefaring natives   grey = pre-space   orange = colony   double dot = binary", FontId::proportional(11.5), DIM);
 
     if let Some(i) = hovered {
         let n = &app.map_list[i];
