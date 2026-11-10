@@ -86,9 +86,9 @@ impl Default for GalaxyOpts {
 impl GalaxyOpts {
     pub fn resources_blurb(a: Abundance) -> &'static str {
         match a {
-            Abundance::Scarce => "Fewer and smaller deposits: carbon and nitrogen are hard to find.",
+            Abundance::Scarce => "Fewer, smaller deposits; slower drones and scoops.",
             Abundance::Normal => "The standard spread of ore, ice, carbon and nitrogen.",
-            Abundance::Abundant => "Deposits are common and deep.",
+            Abundance::Abundant => "Common, deep deposits; faster drones and scoops.",
         }
     }
 
@@ -108,6 +108,16 @@ impl GalaxyOpts {
     /// Multiplier on deposit tonnage.
     pub fn deposit_tons_mult(&self) -> f64 {
         self.resources.pick(0.5, 1.0, 2.0)
+    }
+
+    /// Multiplier on drone mining speed (ore grade).
+    pub fn drone_mult(&self) -> f64 {
+        self.resources.pick(0.75, 1.0, 1.4)
+    }
+
+    /// Multiplier on fuel-scoop yield.
+    pub fn scoop_mult(&self) -> f64 {
+        self.resources.pick(0.85, 1.0, 1.2)
     }
 
     /// Multiplier on the per-system colony chance.

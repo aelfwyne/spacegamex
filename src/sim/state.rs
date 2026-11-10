@@ -186,6 +186,14 @@ pub struct GameOver {
     pub t: f64,
 }
 
+/// Scoop intake per hour at one site.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoopYield {
+    pub h2: f64,
+    pub n2: f64,
+    pub carbon: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sim {
     pub seed: u64,
@@ -461,8 +469,8 @@ fn system_can_settle(gal: &mut Galaxy, id: u64, spec: &ShipSpec) -> bool {
 /// Can this system keep the reactor fed: a star wind strong enough, or a
 /// giant's envelope to scoop?
 fn fuel_sustains(s: &StarSystem, spec: &ShipSpec) -> bool {
-    s.scoop_at(Loc::Star) * spec.scoop_rate > spec.reactor_burn * 1.05
-        || (s.companion_dockable() && s.scoop_at(Loc::Companion) * spec.scoop_rate > spec.reactor_burn * 1.05)
+    s.scoop_at(Loc::Star) * spec.scoop_rate > spec.cruise_burn() * 1.05
+        || (s.companion_dockable() && s.scoop_at(Loc::Companion) * spec.scoop_rate > spec.cruise_burn() * 1.05)
         || s.planets.iter().any(|p| p.scoopable())
 }
 
@@ -623,6 +631,75 @@ impl Sim {
     fn raw_need_target(&self, r: Res, target: f64) -> f64 {
         let buffer = (target - self.inv.fraction(r)).max(0.0) * self.inv.cap(r) * 0.05;
         self.raw_base(r) + buffer
+    }
+
+    /// What the scoop takes in per hour where the ship is now (before any
+    /// brownout), or None if there is nothing to scoop here. Stars give H2;
+    /// giants give H2 and N2 (and carbon, from sky life).
+    pub fn scoop_yield(&self, sys: &StarSystem) -> Option<ScoopYield> {
+        let faulted = self.faults.iter().any(|f| f.kind == FaultKind::Scoop);
+        let base = self.scoop_rate() * if faulted { 0.5 } else { 1.0 };
+        if self.loc.is_stellar() {
+            let k = sys.scoop_at(self.loc);
+            return (k > 0.0).then_some(ScoopYield { h2: base * k, n2: 0.0, carbon: 0.0 });
+        }
+        let p = sys.site(self.loc).filter(|p| p.scoopable())?;
+        let mult = if p.class == super::planet::PlanetClass::GasGiant { 3.5 } else { 1.5 };
+        let rate = base * mult * p.gg_feature.map(|f| f.scoop_mult()).unwrap_or(1.0);
+        let sky_life = p.life.is_some_and(|l| matches!(l, super::planet::LifeType::SkyEcosystem | super::planet::LifeType::SkyLeviathans));
+        Some(ScoopYield { h2: rate * 0.7, n2: rate * 0.3, carbon: if sky_life { rate * 0.05 } else { 0.0 } })
+    }
+
+    /// Reactor output (MW) at the current setting.
+    pub fn power_gen(&self) -> f64 {
+        let spec = self.ship();
+        let faulted = self.faults.iter().any(|f| f.kind == FaultKind::Reactor);
+        spec.reactor_mw * (self.reactor_pct as f64 / 100.0) * if faulted { 0.55 } else { 1.0 }
+    }
+
+    /// Power draw (MW) of everything switched on and working right now.
+    /// The one place the load is defined: the sim and the UI both use it.
+    pub fn power_load(&self, sys: &StarSystem) -> f64 {
+        let spec = self.ship();
+        let busy = self.shuttle.is_some() || self.trip.is_some();
+        let mut load = spec.ls_mw * (self.ls_eff as f64 / 100.0);
+        // The scoop draws power wherever it is actually scooping (stars
+        // and giants alike).
+        if self.scoop_on && !busy && self.scoop_yield(sys).is_some() {
+            load += spec.scoop_mw;
+        }
+        if self.mining_on && !busy && self.loc.is_body() && sys.site(self.loc).is_some() {
+            load += spec.drones as f64 * spec.drone_mw;
+        }
+        if self.focus != Focus::Idle {
+            load += spec.fab_mw;
+        }
+        if self.shields {
+            load += spec.shields_mw;
+        }
+        if self.trip.is_some() {
+            load += spec.ftl_mw;
+        }
+        if self.trip.is_none() && self.ftl_charge < 100.0 {
+            load += spec.precharge_mw;
+        }
+        load
+    }
+
+    /// H2 kg/h the reactor is burning at the current load.
+    pub fn reactor_burn_now(&self, sys: &StarSystem) -> f64 {
+        self.ship().burn_at(self.power_load(sys).min(self.power_gen()))
+    }
+
+    /// Full-crew drone output, kg/h (ship × the Resources option).
+    pub fn drone_rate(&self) -> f64 {
+        let spec = self.ship();
+        spec.drones as f64 * spec.drone_yield * self.opts.drone_mult()
+    }
+
+    /// Scoop H2+N2 kg/h at a solar-mass G star (ship × Resources option).
+    pub fn scoop_rate(&self) -> f64 {
+        self.ship().scoop_rate * self.opts.scoop_mult()
     }
 
     /// Scale for the rate of negative random events (the Risk option).
@@ -1109,9 +1186,7 @@ impl Sim {
 
         // ---------- fault state for this step ----------
         let fault = |k: FaultKind| self.faults.iter().any(|f| f.kind == k);
-        let reactor_faulted = fault(FaultKind::Reactor);
         let ls_faulted = fault(FaultKind::LifeSupport);
-        let scoop_faulted = fault(FaultKind::Scoop);
         let drones_faulted = fault(FaultKind::Drones);
         let coil_faulted = fault(FaultKind::FtlCoil);
 
@@ -1232,32 +1307,13 @@ impl Sim {
         let tripping = self.trip.is_some();
 
         // ---------- power budget ----------
-        let mut load = spec.ls_mw * (self.ls_eff as f64 / 100.0);
-        if at_star && self.scoop_on && !moving && !tripping {
-            load += spec.scoop_mw;
-        }
-        if at_planet && self.mining_on && !moving && !tripping {
-            load += spec.drones as f64 * spec.drone_mw;
-        }
-        if self.focus != Focus::Idle {
-            load += spec.fab_mw;
-        }
-        if self.shields {
-            load += spec.shields_mw;
-        }
-        if tripping {
-            load += spec.ftl_mw;
-        }
-        let charging = !tripping && self.ftl_charge < 100.0;
-        if charging {
-            load += spec.precharge_mw;
-        }
+        let load = self.power_load(sys);
+        let mut output = self.power_gen();
 
-        let reactor_eff = if reactor_faulted { 0.55 } else { 1.0 };
-        let mut output = spec.reactor_mw * (self.reactor_pct as f64 / 100.0) * reactor_eff;
-
-        // Reactor fuel
-        let reactor_need = spec.reactor_burn * (self.reactor_pct as f64 / 100.0) * reactor_eff * dt_h;
+        // Reactor fuel: burn follows the power actually drawn (capped by
+        // the reactor setting), not the rating. A ship idling at a red
+        // dwarf used to burn as if it were at full throttle.
+        let reactor_need = spec.burn_at(load.min(output)) * dt_h;
         let have_h2 = self.inv.get(Res::H2);
         let fuel_scale_r = if reactor_need > 0.0 { (have_h2 / reactor_need).min(1.0) } else { 1.0 };
         if fuel_scale_r < 1.0 {
@@ -1273,25 +1329,12 @@ impl Sim {
         self.last_brownout = brownout < 1.0;
 
         // ---------- fuel scoop ----------
-        if self.scoop_on && !moving && !tripping {
-            let base = spec.scoop_rate * if scoop_faulted { 0.5 } else { 1.0 } * brownout;
-            if at_star {
-                let rate = base * sys.scoop_at(here);
-                let got = self.inv.add(Res::H2, rate * dt_h);
-                self.stats.scooped += got;
-            } else if let Some(p) = sys.site(here)
-                    && p.scoopable() {
-                        let mult = if p.class == super::planet::PlanetClass::GasGiant { 3.5 } else { 1.5 };
-                        let rate = base * mult * p.gg_feature.map(|f| f.scoop_mult()).unwrap_or(1.0);
-                        let h2 = rate * 0.7 * dt_h;
-                        let n2 = rate * 0.3 * dt_h;
-                        self.stats.scooped += self.inv.add(Res::H2, h2);
-                        self.inv.add(Res::Nitrogen, n2);
-                        // Sky life: the scoop strains organics out of the clouds.
-                        if p.life.is_some_and(|l| matches!(l, super::planet::LifeType::SkyEcosystem | super::planet::LifeType::SkyLeviathans)) {
-                            self.inv.add(Res::Carbon, rate * 0.05 * dt_h);
-                        }
-                    }
+        if self.scoop_on && !moving && !tripping
+            && let Some(y) = self.scoop_yield(sys)
+        {
+            self.stats.scooped += self.inv.add(Res::H2, y.h2 * brownout * dt_h);
+            self.inv.add(Res::Nitrogen, y.n2 * brownout * dt_h);
+            self.inv.add(Res::Carbon, y.carbon * brownout * dt_h);
         }
 
         // ---------- mining drones ----------
@@ -1303,7 +1346,7 @@ impl Sim {
                 if let Some(pname) = &p_name
                     && p_mineable && sys.site(here).is_some_and(|p| p.deposits.iter().any(|d| d.tons >= 1.0)) {
                     let drones = spec.drones as f64 * if drones_faulted { 0.5 } else { 1.0 };
-                    let yield_kg = drones * spec.drone_yield * brownout * morale_eff * dt_h;
+                    let yield_kg = drones * spec.drone_yield * self.opts.drone_mult() * brownout * morale_eff * dt_h;
 
                     // Allocation: two stages. First the population's raw ore
                     // demand (life support, food, upkeep); second, buffer
@@ -1456,7 +1499,7 @@ impl Sim {
         if self.salvage_on && self.mining_on && at_planet && !moving && !tripping {
             let morale_eff = 0.75 + 0.25 * (self.crew.morale.min(100.0) / 100.0);
             let drones = spec.drones as f64 * if drones_faulted { 0.5 } else { 1.0 };
-            let rate = drones * spec.drone_yield * 2.0 * brownout * morale_eff * dt_h;
+            let rate = drones * spec.drone_yield * self.opts.drone_mult() * 2.0 * brownout * morale_eff * dt_h;
             let mut found_cr = 0.0;
             let mut done: Option<String> = None;
             if let Some(sv) = sys.site_mut(here).and_then(|p| p.salvage.as_mut())
@@ -1519,7 +1562,7 @@ impl Sim {
             let refill_cap_h = if moving || tripping {
                 0.0
             } else {
-                ((spec.drones as f64 * spec.drone_yield) - pop_raw).max(0.0) * 0.5
+                (self.drone_rate() - pop_raw).max(0.0) * 0.5
             };
             // Pass 1: what each recipe wants. Pass 2: produce them in
             // priority order. Splitting the passes lets the buffer refills
@@ -1993,7 +2036,7 @@ impl Sim {
         // Best fuel source in the system: the star wind is always available
         // (duty 1); a giant's envelope is richer per hour but costs two
         // transits per visit, so it only wins when it is close in *and* rich.
-        let star_fuel = sys.scoop_at(Loc::Star) * spec.scoop_rate;
+        let star_fuel = sys.scoop_at(Loc::Star) * self.scoop_rate();
         let mut fuel_planet: Option<usize> = None;
         let mut fuel_best = star_fuel;
         for (i, (_, p)) in sites.iter().enumerate() {
@@ -2005,7 +2048,7 @@ impl Sim {
             } else {
                 1.5
             };
-            let eff = spec.scoop_rate * mult * 0.7 * p.gg_feature.map(|f| f.scoop_mult()).unwrap_or(1.0)
+            let eff = self.scoop_rate() * mult * 0.7 * p.gg_feature.map(|f| f.scoop_mult()).unwrap_or(1.0)
                 * mining_duty(0.25 + site_au[i] * spec.move_time_per_au);
             if eff > fuel_best {
                 fuel_best = eff;
@@ -2014,7 +2057,7 @@ impl Sim {
         }
 
         // Can this system sustain us on fuel alone (star wind or a giant)?
-        let fuel_sustain = star_fuel > spec.reactor_burn * 1.05 || fuel_planet.is_some();
+        let fuel_sustain = star_fuel > spec.cruise_burn() * 1.05 || fuel_planet.is_some();
         // A "settled" system is a base: fuel AND everything life support
         // needs long-term (water source, food sources, or a market).
         // Everything else is a waypoint — work briefly, then move on.

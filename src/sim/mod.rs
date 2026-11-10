@@ -1,5 +1,6 @@
 pub mod civ;
 pub mod galaxy;
+pub mod balance;
 pub mod logbuf;
 pub mod opts;
 pub mod planet;

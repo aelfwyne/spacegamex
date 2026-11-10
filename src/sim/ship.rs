@@ -64,9 +64,9 @@ const SOLO: ShipSpec = ShipSpec {
     reactor_mw: 100.0,
     reactor_burn: 12.0,
     scoop_mw: 5.0,
-    scoop_rate: 20.0,
-    drones: 1,
-    drone_yield: 5.0,
+    scoop_rate: 30.0,
+    drones: 2,
+    drone_yield: 8.0,
     drone_mw: 2.0,
     fab_rate: 80.0,
     fab_mw: 25.0,
@@ -121,7 +121,7 @@ const COMPANY: ShipSpec = ShipSpec {
     scoop_mw: 10.0,
     scoop_rate: 80.0,
     drones: 3,
-    drone_yield: 8.0,
+    drone_yield: 12.0,
     drone_mw: 2.0,
     fab_rate: 300.0,
     fab_mw: 60.0,
@@ -176,7 +176,7 @@ const COLONY: ShipSpec = ShipSpec {
     scoop_mw: 25.0,
     scoop_rate: 400.0,
     drones: 40,
-    drone_yield: 35.0,
+    drone_yield: 40.0,
     drone_mw: 2.0,
     fab_rate: 1_600.0,
     fab_mw: 200.0,
@@ -225,9 +225,25 @@ const COLONY: ShipSpec = ShipSpec {
 
 pub const SHIPS: [ShipSpec; 3] = [SOLO, COMPANY, COLONY];
 
+/// The reactor never idles below this share of its rated burn.
+pub const REACTOR_IDLE: f64 = 0.1;
+
 impl ShipSpec {
     pub fn spec(idx: usize) -> &'static ShipSpec {
         &SHIPS[idx % SHIPS.len()]
+    }
+
+    /// H2 kg/h the reactor burns delivering `mw` (fuel follows the power
+    /// actually drawn, with a small idle floor).
+    pub fn burn_at(&self, mw: f64) -> f64 {
+        self.reactor_burn * (mw / self.reactor_mw).clamp(REACTOR_IDLE, 1.0)
+    }
+
+    /// Typical burn while parked and working: life support, fab, shields
+    /// and scoop or drones running. Used for planning, not the sim itself.
+    pub fn cruise_burn(&self) -> f64 {
+        let work = self.scoop_mw.max(self.drones as f64 * self.drone_mw);
+        self.burn_at(self.ls_mw + self.fab_mw + self.shields_mw + work)
     }
 
     /// Throttle multipliers: (speed, burn) at 50/75/100.

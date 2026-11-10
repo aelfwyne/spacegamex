@@ -54,9 +54,10 @@ pub fn controls(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     egui::CollapsingHeader::new(RichText::new("POWER & SYSTEMS").strong().color(ACCENT))
         .default_open(true)
         .show(ui, |ui| {
-            let (gen_mw, load) = power_budget(sim);
+            let (gen_mw, load, burn) = power_budget(app);
             let short = gen_mw < load;
-            bar_colored(ui, (gen_mw / load.max(1e-9)).min(1.0), format!("gen {gen_mw:.0} MW / draw {load:.0} MW"), ui.available_width(), if short { BAD } else { GOOD });
+            bar_colored(ui, (gen_mw / load.max(1e-9)).min(1.0), format!("gen {gen_mw:.0} MW / draw {load:.0} MW · burn {burn:.1} kg/h"), ui.available_width(), if short { BAD } else { GOOD })
+                .on_hover_text("The reactor burns H2 for the power actually drawn, not its rating.");
             if short {
                 ui.label(RichText::new("BROWNOUT — systems running below spec").color(BAD).strong());
             }
@@ -739,8 +740,9 @@ pub fn systems(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         ui.label("Reactor output");
         ui.horizontal(|ui| {
             segmented(ui, sim.reactor_pct, &[25, 50, 75, 100], Action::SetReactor, acts);
-            let k = sim.reactor_pct as f64 / 100.0 * if rf { 0.55 } else { 1.0 };
-            ui.label(dim(format!("{:.0} MW, burn {:.0} kg/h", spec.reactor_mw * k, spec.reactor_burn * k)));
+            let (gen_mw, _, burn) = power_budget(app);
+            let max_burn = spec.burn_at(gen_mw);
+            ui.label(dim(format!("{gen_mw:.0} MW · burning {burn:.1} kg/h H2 now (up to {max_burn:.1} at full load)")));
         });
         fault_tag(ui, rf);
         ui.end_row();
@@ -831,7 +833,7 @@ pub fn systems(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         ui.end_row();
     });
     ui.add_space(8.0);
-    let (gen_mw, load) = power_budget(sim);
+    let (gen_mw, load, _) = power_budget(app);
     ui.horizontal(|ui| {
         ui.label("Power budget");
         bar_colored(ui, (gen_mw / load.max(1e-9)).min(1.0), format!("gen {gen_mw:.0} MW / draw {load:.0} MW"), 320.0, if gen_mw < load { BAD } else { GOOD });

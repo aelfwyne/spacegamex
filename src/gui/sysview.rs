@@ -421,6 +421,38 @@ pub fn body_tooltip(ui: &mut Ui, sys: &StarSystem, p: &Planet) {
     ui.label(dim("double-click to shuttle here"));
 }
 
+/// One line on fuel where the ship is: what the scoop takes in against
+/// what the reactor burns, and the net. Green when the tank is filling.
+fn fuel_status(app: &App) -> (String, Color32) {
+    let sim = app.sim();
+    let sys = app.gal.system_ref(sim.sys_id);
+    if sim.trip.is_some() || sim.shuttle.is_some() {
+        return ("In transit: nothing to scoop or mine until docked.".into(), DIM);
+    }
+    let burn = sim.reactor_burn_now(sys);
+    let h2 = sim.inv.get(crate::sim::Res::H2);
+    let drones = if sim.loc.is_body() { " Drones mine this world's deposits." } else { "" };
+    match sim.scoop_yield(sys) {
+        Some(y) if sim.scoop_on => {
+            let net = y.h2 - burn;
+            let n2 = if y.n2 > 0.0 { format!(" (+{:.1} N2)", y.n2) } else { String::new() };
+            let text = format!("Fuel: scoop +{:.1} H2/h{n2} · reactor −{burn:.1}/h · net {net:+.1}/h.{drones}", y.h2);
+            (text, if net > 0.0 { GOOD } else { BAD })
+        }
+        Some(y) => (
+            format!("Scoop is OFF. Here it would take +{:.1} H2/h against the reactor's −{burn:.1}/h.{drones}", y.h2),
+            WARN,
+        ),
+        None => (
+            format!(
+                "No fuel to scoop here: reactor −{burn:.1} kg/h H2, tank lasts {}.{drones}",
+                fmt_hours(h2 / burn.max(1e-9))
+            ),
+            WARN,
+        ),
+    }
+}
+
 fn footer(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     let sim = app.sim();
     let sys = app.gal.system_ref(sim.sys_id);
@@ -484,11 +516,8 @@ fn footer(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             view.sys_zoom = 1.0;
             view.sys_pan = Vec2::ZERO;
         }
-        ui.label(dim(match sim.loc {
-            Loc::Star => "Docked at the star: the fuel scoop works here.",
-            Loc::Companion => "Docked at the companion star: the fuel scoop works here.",
-            _ => "Docked at a world: drones mine its deposits; giants can be scooped.",
-        }));
+        let (text, color) = fuel_status(app);
+        ui.label(RichText::new(text).color(color));
         if sys.civ.as_ref().is_some_and(|cv| cv.kind == CivKind::Colony) {
             ui.label(RichText::new("■ colony in system").color(COLONY_COL));
         }

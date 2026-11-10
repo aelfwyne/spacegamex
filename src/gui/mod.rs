@@ -448,34 +448,12 @@ fn toast(ctx: &egui::Context, app: &App) {
         });
 }
 
-/// Power budget: (generation MW, draw MW) for the current settings.
-pub fn power_budget(sim: &Sim) -> (f64, f64) {
-    use crate::sim::state::{FaultKind, Focus};
-    let spec = sim.ship();
-    let reactor_fault = sim.faults.iter().any(|f| f.kind == FaultKind::Reactor);
-    let moving = sim.shuttle.is_some();
-    let tripping = sim.trip.is_some();
-    let mut load = spec.ls_mw * sim.ls_eff as f64 / 100.0;
-    if sim.scoop_on && matches!(sim.loc, crate::sim::Loc::Star) && !moving && !tripping {
-        load += spec.scoop_mw;
-    }
-    if sim.mining_on && matches!(sim.loc, crate::sim::Loc::Planet(_)) && !moving && !tripping {
-        load += spec.drones as f64 * spec.drone_mw;
-    }
-    if sim.focus != Focus::Idle {
-        load += spec.fab_mw;
-    }
-    if sim.shields {
-        load += spec.shields_mw;
-    }
-    if tripping {
-        load += spec.ftl_mw;
-    }
-    if !tripping && sim.ftl_charge < 100.0 {
-        load += spec.precharge_mw;
-    }
-    let gen_mw = spec.reactor_mw * sim.reactor_pct as f64 / 100.0 * if reactor_fault { 0.55 } else { 1.0 };
-    (gen_mw, load)
+/// Power budget: (generation MW, draw MW, H2 burn kg/h) right now. The
+/// sim defines all three; this only looks them up.
+pub fn power_budget(app: &App) -> (f64, f64, f64) {
+    let sim = app.sim();
+    let sys = app.gal.system_ref(sim.sys_id);
+    (sim.power_gen(), sim.power_load(sys), sim.reactor_burn_now(sys))
 }
 
 #[cfg(test)]

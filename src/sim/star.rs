@@ -29,12 +29,14 @@ impl StarClass {
             StarClass::A => 1.7,
             StarClass::F => 1.25,
             StarClass::G => 1.0,
-            StarClass::K => 0.7,
-            StarClass::M => 0.45,
-            // A white dwarf has almost no wind; a brown dwarf none to speak of.
-            StarClass::D => 0.2,
-            StarClass::L => 0.08,
-            StarClass::T => 0.04,
+            StarClass::K => 0.8,
+            // Red dwarfs are the common case: a small ship must be able to
+            // live off one, if not comfortably.
+            StarClass::M => 0.7,
+            // A white dwarf has little wind; a brown dwarf barely any.
+            StarClass::D => 0.35,
+            StarClass::L => 0.15,
+            StarClass::T => 0.08,
         }
     }
 
