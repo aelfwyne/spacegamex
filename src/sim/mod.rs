@@ -1,4 +1,5 @@
 pub mod civ;
+pub mod colony;
 pub mod combat;
 pub mod commerce;
 pub mod galaxy;

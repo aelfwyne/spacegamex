@@ -45,4 +45,20 @@ impl Sim {
     pub fn artifact_attack(&self) -> f64 {
         self.powers(Power::Attack) as f64
     }
+
+    pub fn artifact_tech_boost(&self) -> f64 {
+        1.0 + 0.25 * self.powers(Power::ColonyTech) as f64
+    }
+
+    pub fn artifact_health_boost(&self) -> f64 {
+        0.05 * self.powers(Power::ColonyHealth) as f64
+    }
+
+    pub fn artifact_scoop(&self) -> f64 {
+        1.0 + 0.15 * self.powers(Power::Scoop) as f64
+    }
+
+    pub fn artifact_shield(&self) -> f64 {
+        0.75f64.powi(self.powers(Power::Shields) as i32)
+    }
 }

@@ -351,6 +351,11 @@ pub struct Sim {
     /// Colony mode: the captain is at the colony and the ship is mothballed.
     #[serde(default)]
     pub in_colony: bool,
+    #[serde(default)]
+    pub colony: Option<super::colony::PlayerColony>,
+    /// The ship was lost; play goes on at the colony.
+    #[serde(default)]
+    pub ship_dormant: bool,
 }
 
 fn poisson(rng: &mut StdRng, lambda: f64) -> u32 {
@@ -779,7 +784,7 @@ impl Sim {
 
     /// Scoop H2+N2 kg/h at a solar-mass G star (ship × Resources option).
     pub fn scoop_rate(&self) -> f64 {
-        self.ship().scoop_rate * self.opts.scoop_mult() * self.crew_bonus()
+        self.ship().scoop_rate * self.opts.scoop_mult() * self.crew_bonus() * self.artifact_scoop()
     }
 
     /// Scale for the rate of negative random events (the Risk option).
@@ -908,6 +913,8 @@ impl Sim {
             encounter: None,
             in_colony: false,
             artifacts: vec![],
+            colony: None,
+            ship_dormant: false,
         };
         // The captain's age and retirement: their own stream, so adding
         // them changed nothing else about a seed.
@@ -1256,7 +1263,12 @@ impl Sim {
     }
 
     pub(crate) fn game_over(&mut self, cause: &str, detail: String) {
-        if self.over.is_some() {
+        if self.over.is_some() || self.ship_dormant {
+            return;
+        }
+        // With a colony standing, losing the ship is not the end.
+        if self.colony.is_some() {
+            self.ship_lost_to_colony(cause, &detail);
             return;
         }
         self.log.push(self.t, Level::Critical, format!("FATAL: {cause}. {detail}"));
@@ -1280,9 +1292,23 @@ impl Sim {
         if self.over.is_some() || dt_h <= 0.0 || self.encounter.is_some() {
             return;
         }
+        if self.in_colony {
+            // The ship is mothballed: only the colony's clock runs.
+            self.t += dt_h * 3600.0;
+            self.colony_tick(gal);
+            return;
+        }
+        let hull_before = self.hull;
         self.advance_ship(dt_h, gal);
-        if self.over.is_none() {
+        // Shield artifacts soak a share of every hull hit.
+        if self.hull < hull_before && !self.artifacts.is_empty() {
+            self.hull = hull_before - (hull_before - self.hull) * self.artifact_shield();
+        }
+        if self.over.is_none() && !self.in_colony {
             self.combat_tick(dt_h, gal);
+        }
+        if self.colony.is_some() {
+            self.colony_tick(gal);
         }
     }
 

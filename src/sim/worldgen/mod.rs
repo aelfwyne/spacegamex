@@ -607,7 +607,7 @@ fn deposits(rng: &mut StdRng, b: &Proto, class: PlanetClass, opts: &GalaxyOpts) 
 }
 
 /// The civilisation trade deals with: the most capable one in the system.
-fn derive_civ(planets: &[Planet]) -> Option<Civ> {
+pub(crate) fn derive_civ(planets: &[Planet]) -> Option<Civ> {
     let mut best: Option<Civ> = None;
     let mut consider = |c: Civ| {
         if best.as_ref().is_none_or(|b| c.tier > b.tier) {
