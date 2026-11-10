@@ -183,7 +183,8 @@ fn people_rows(ui: &mut Ui, sim: &Sim, w: f32) {
 }
 
 fn rate_label(ui: &mut Ui, r: f64) {
-    if r.abs() < 0.005 {
+    // Below what "{:.1}" can show: a dot, not a red "-0.0/h".
+    if r.abs() < 0.05 {
         ui.label(dim("·"));
     } else if r > 0.0 {
         ui.label(RichText::new(format!("+{r:.1}/h")).color(GOOD).monospace());

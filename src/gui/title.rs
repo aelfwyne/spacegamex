@@ -174,6 +174,8 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             galaxy_options(ui, app.gal.opts, acts);
             ui.add_space(8.0);
             ui.label(dim("Pick a ship with 1–3 or the arrow keys, or double-click a card."));
+            ui.add_space(6.0);
+            ui.label(dim(crate::BUILD));
         });
     });
 }

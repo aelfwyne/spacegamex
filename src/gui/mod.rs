@@ -306,7 +306,8 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
     let spec = sim.ship();
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("FTL DRIFT").strong().size(20.0).color(ACCENT));
+        ui.label(RichText::new("FTL DRIFT").strong().size(20.0).color(ACCENT)).on_hover_text(crate::BUILD);
+        ui.label(dim(concat!("built ", env!("BUILD_STAMP")))).on_hover_text(crate::BUILD);
         ui.label(RichText::new(spec.name).strong().size(16.0));
         ui.label(dim(format!("seed 0x{:012X}", sim.seed)));
         ui.separator();

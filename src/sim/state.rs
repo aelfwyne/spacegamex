@@ -297,6 +297,8 @@ struct Recipe {
 const REC_O2: Recipe = Recipe { inputs: &[(Res::Water, 1.125)], out: Res::Oxygen, byproduct: Some((Res::H2, 0.125)), raw_eq: 1.125 };
 const REC_WATER: Recipe = Recipe { inputs: &[(Res::Ice, 1.0)], out: Res::Water, byproduct: None, raw_eq: 1.0 };
 const REC_FOOD: Recipe = Recipe { inputs: &[(Res::Carbon, 0.5), (Res::Nitrogen, 0.25), (Res::Water, 0.5)], out: Res::Food, byproduct: None, raw_eq: 1.25 };
+/// Time constant (game hours) of the displayed resource-rate average.
+const RATE_SMOOTH_H: f64 = 0.5;
 const REC_MAT: Recipe = Recipe { inputs: &[(Res::Metal, 0.5), (Res::Silicate, 0.5)], out: Res::Mat, byproduct: None, raw_eq: 1.0 };
 const REC_MED: Recipe = Recipe { inputs: &[(Res::Metal, 0.4), (Res::Carbon, 0.2), (Res::Water, 0.3)], out: Res::Med, byproduct: None, raw_eq: 0.9 };
 
@@ -1906,9 +1908,14 @@ impl Sim {
         }
 
         // ---------- bookkeeping ----------
+        // Displayed rates are averaged over ~half a game hour. A raw
+        // per-step delta flickers red/green whenever something runs in
+        // bursts (the fab topping a tank up, a repair batch, the drones).
+        let k = 1.0 - (-dt_h / RATE_SMOOTH_H).exp();
         for r in Res::ALL {
-            let d = self.inv.get(r) - before.get(&r).copied().unwrap_or(0.0);
-            self.rates.insert(r, d / dt_h);
+            let now = (self.inv.get(r) - before.get(&r).copied().unwrap_or(0.0)) / dt_h;
+            let prev = self.rates.get(&r).copied().unwrap_or(now);
+            self.rates.insert(r, prev + (now - prev) * k);
         }
         self.t += dt_h * 3600.0;
         self.autosave_h += dt_h;
