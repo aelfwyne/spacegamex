@@ -244,6 +244,21 @@ must survive 500 h), `7`, `100`, `2026`, `1234`, `999`. The home system is
 always a yellow G star with a gas giant, an ice giant and workable rocky
 inner worlds, and never has a civilisation or a companion.
 
+### Galaxy options
+
+Under the title-screen buttons, three options shape a new galaxy. With the
+seed they fully determine it: the same seed keeps the same star map, while
+the options change what the systems hold.
+
+- **Resources** — Scarce / *Normal* / Abundant: how common and how deep
+  deposits are, and how fast drones and scoops work.
+- **Civilization** — *Scarce* / Normal / Abundant: how many natives and
+  colonies there are, and how many of them are spacefaring and trade.
+- **Risk** — Tourist / *Normal* / Risky: how often breakdowns, hazards and
+  micrometeorite impacts happen.
+
+Defaults are in italics. The options are stored in the save.
+
 ## Balance notes
 
 The balance target: **under autopilot, every ship survives 500 h with zero
@@ -295,9 +310,10 @@ Autosaves every in-game hour and on quit (including closing the window);
 temporary file and renamed, so a crash mid-save cannot corrupt the previous
 save; if a save cannot be loaded, the title screen says why.
 
-Save format 3 (this version) uses the detailed world generator, so every
-galaxy changed shape: saves from earlier versions cannot be continued (the
-title screen says so) and start a new game instead.
+Save format 3 (since v0.3.0) uses the detailed world generator, so every
+galaxy changed shape: saves from v0.2.0 and earlier cannot be continued (the
+title screen says so) and start a new game instead. v0.3.0 saves load in
+v0.4.0 with the default galaxy options.
 
 ## Building on Windows (future)
 
