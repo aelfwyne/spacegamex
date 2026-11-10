@@ -49,7 +49,9 @@ mod tests {
         sim.ftl_charge = 100.0;
         sim.opts.risk = crate::sim::Risk::Tourist;
         let dt = 0.25;
+        // Pirates are not part of a rate measurement: wave them off.
         for _ in 0..(24.0 / dt) as usize {
+            sim.encounter = None;
             sim.advance(dt, &mut gal);
         }
         // Raw tanks at 20%, so no tank tops out and hides its true rate.
@@ -61,6 +63,7 @@ mod tests {
         let before: Vec<f64> = Res::ALL.iter().map(|&r| sim.inv.get(r)).collect();
         let hours = 12.0;
         for _ in 0..(hours / dt) as usize {
+            sim.encounter = None;
             sim.advance(dt, &mut gal);
         }
         Res::ALL.iter().zip(before).map(|(&r, b)| (r, (sim.inv.get(r) - b) / hours)).collect()

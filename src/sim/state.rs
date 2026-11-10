@@ -325,6 +325,32 @@ pub struct Sim {
     // ---- commerce ----
     #[serde(default)]
     pub hold: Hold,
+
+    // ---- combat ----
+    #[serde(default)]
+    pub attack_lvl: u8,
+    #[serde(default)]
+    pub defense_lvl: u8,
+    #[serde(default)]
+    pub battles_won: u32,
+    #[serde(default)]
+    pub battles_lost: u32,
+    /// Pirate bounties earned, paid at the next T2/T3 port.
+    #[serde(default)]
+    pub pending_bounty: f64,
+    /// Pirates hailing you right now: time stops until you answer.
+    #[serde(default)]
+    pub encounter: Option<super::combat::Encounter>,
+
+    // ---- quests ----
+    /// Artifacts kept for their powers.
+    #[serde(default)]
+    pub artifacts: Vec<super::quest::Artifact>,
+
+    // ---- colony ----
+    /// Colony mode: the captain is at the colony and the ship is mothballed.
+    #[serde(default)]
+    pub in_colony: bool,
 }
 
 fn poisson(rng: &mut StdRng, lambda: f64) -> u32 {
@@ -874,6 +900,14 @@ impl Sim {
             spouse: None,
             pilot: None,
             hold: Hold::default(),
+            attack_lvl: 0,
+            defense_lvl: 0,
+            battles_won: 0,
+            battles_lost: 0,
+            pending_bounty: 0.0,
+            encounter: None,
+            in_colony: false,
+            artifacts: vec![],
         };
         // The captain's age and retirement: their own stream, so adding
         // them changed nothing else about a seed.
@@ -1221,7 +1255,7 @@ impl Sim {
         pay
     }
 
-    fn game_over(&mut self, cause: &str, detail: String) {
+    pub(crate) fn game_over(&mut self, cause: &str, detail: String) {
         if self.over.is_some() {
             return;
         }
@@ -1242,9 +1276,17 @@ impl Sim {
 
     /// Advance by `dt_h` in-game hours.
     pub fn advance(&mut self, dt_h: f64, gal: &mut Galaxy) {
-        if self.over.is_some() || dt_h <= 0.0 {
+        // Pirates hailing: time stands still until the captain answers.
+        if self.over.is_some() || dt_h <= 0.0 || self.encounter.is_some() {
             return;
         }
+        self.advance_ship(dt_h, gal);
+        if self.over.is_none() {
+            self.combat_tick(dt_h, gal);
+        }
+    }
+
+    fn advance_ship(&mut self, dt_h: f64, gal: &mut Galaxy) {
         let spec = self.ship();
         self.rng_step = self.rng_step.wrapping_add(1);
         let mut rng = derive(self.seed ^ 0x57e9_57e9, self.rng_step);
@@ -1313,7 +1355,7 @@ impl Sim {
                             match (c.kind, c.tier) {
                                 (CivKind::Natives, CivTier::T3) => format!("The {} of {seat} run an interstellar station — trade and shipyard services available.", c.name),
                                 (CivKind::Natives, CivTier::T2) => format!("The {} of {seat} are a spacefaring people. Their market may trade some goods.", c.name),
-                                (CivKind::Natives, CivTier::T1) => format!("You observe the {} on {seat}, a pre-space people. They do not know you are here.", c.name),
+                                (CivKind::Natives, CivTier::T1) => format!("The {} of {seat} are a pre-space people. They will barter crafts and goods (Trade, Cargo tab).", c.name),
                                 (CivKind::Colony, CivTier::T3) => format!("{} on {seat} is an industrial colony with a full resupply station and shipyard.", c.name),
                                 (CivKind::Colony, CivTier::T2) => format!("{} on {seat} is a colony with a small market.", c.name),
                                 (CivKind::Colony, CivTier::T1) => format!("{} on {seat} is a fallen colony. The survivors have nothing to trade.", c.name),
@@ -2052,6 +2094,9 @@ impl Sim {
     pub fn autopilot(&mut self, gal: &mut Galaxy) {
         if self.over.is_some() {
             return;
+        }
+        if self.encounter.is_some() {
+            self.auto_resolve_encounter();
         }
         let spec = self.ship();
         let hmax = spec.hull;

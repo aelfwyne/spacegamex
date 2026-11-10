@@ -134,6 +134,10 @@ pub enum Action {
     SellGood(Good),
     RecruitPartner,
     HirePilot,
+    /// Buy an Attack (true) or Defense (false) level at a T3 shipyard.
+    BuyUpgrade(bool),
+    // ---- pirates ----
+    Encounter(crate::sim::combat::Choice),
     // ---- misc ----
     Save,
 }
@@ -359,7 +363,7 @@ impl App {
             return;
         }
         let mut chunks = 0;
-        while sim.trip.is_some() && sim.over.is_none() && chunks < 200_000 {
+        while sim.trip.is_some() && sim.over.is_none() && sim.encounter.is_none() && chunks < 200_000 {
             sim.advance(0.5, &mut self.gal);
             chunks += 1;
             if sim.autosave_h >= 1.0 {
@@ -648,6 +652,11 @@ impl App {
                 let sim = self.sim.as_mut().unwrap();
                 sim.hire_pilot(&mut self.gal);
             }
+            Action::BuyUpgrade(attack) => {
+                let sim = self.sim.as_mut().unwrap();
+                sim.buy_upgrade(&self.gal, attack);
+            }
+            Action::Encounter(c) => self.with_sim(|s| s.resolve_encounter(c)),
             Action::RepairHull => {
                 let sim = self.sim.as_mut().unwrap();
                 sim.repair_hull_t3(&mut self.gal);
@@ -764,6 +773,24 @@ impl App {
             Key::Char(c) => Key::Char(c.to_ascii_lowercase()),
             other => other,
         };
+        // Pirates hailing: only the answer keys work until it is settled.
+        if let Some(stage) = self.sim.as_ref().filter(|s| s.over.is_none()).and_then(|s| s.encounter.as_ref()).map(|e| e.stage) {
+            use crate::sim::combat::{Choice, Stage};
+            let act = match (stage, k) {
+                (Stage::Approach, Key::Char('1')) => Some(Action::Encounter(Choice::Fight)),
+                (Stage::Approach, Key::Char('2')) => Some(Action::Encounter(Choice::Flee)),
+                (Stage::Approach, Key::Char('3')) => Some(Action::Encounter(Choice::Pay)),
+                (Stage::Won, Key::Char('1')) => Some(Action::Encounter(Choice::Destroy)),
+                (Stage::Won, Key::Char('2')) => Some(Action::Encounter(Choice::Release)),
+                (_, Key::Char('q')) => Some(Action::Quit),
+                (_, Key::Char('g')) => Some(Action::Save),
+                _ => None,
+            };
+            if let Some(a) = act {
+                self.apply(a);
+            }
+            return;
+        }
         let act: Option<Action> = match self.screen {
             Screen::Title => match k {
                 Key::Char(c @ '1'..='3') => Some(Action::SelectShip(c as usize - '1' as usize)),

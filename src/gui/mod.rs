@@ -4,6 +4,7 @@
 //! frame loop applies them afterwards. That keeps every rule in
 //! [`crate::game`], and lets tests render every screen headlessly.
 
+pub mod encounter;
 pub mod mapview;
 pub mod paint;
 pub mod panels;
@@ -252,6 +253,9 @@ pub fn draw(ui: &mut Ui, app: &App, view: &mut View) -> Vec<Action> {
             egui::CentralPanel::default().show(ui, |ui| panels::help(ui, app, &mut acts));
         }
         _ => in_game(ui, app, view, &mut acts),
+    }
+    if app.screen.in_game() {
+        encounter::draw(ui.ctx(), app, &mut acts);
     }
     toast(ui.ctx(), app);
     if view.last_map_sel != app.map_sel && app.screen != Screen::Map {
@@ -516,6 +520,34 @@ mod smoke_tests {
                 ] {
                     app.screen = s;
                     frame(&ctx, &app, &mut view, w, h);
+                }
+                // A port with every Trade tab, and pirates at both stages.
+                {
+                    use crate::sim::civ::{Civ, CivKind, CivTier};
+                    let id = app.sim().sys_id;
+                    for tier in [CivTier::T1, CivTier::T2, CivTier::T3] {
+                        let sys = app.gal.system(id);
+                        sys.civ = Some(Civ { tier, name: "Smoke".into(), kind: CivKind::Natives, seat: crate::sim::Loc::Planet(0), small: false });
+                        sys.market = None;
+                        sys.refresh_cargo_market(42);
+                        app.screen = Screen::Trade;
+                        for tab in [crate::game::TradeTab::Resources, crate::game::TradeTab::Cargo, crate::game::TradeTab::Port] {
+                            app.trade_tab = tab;
+                            frame(&ctx, &app, &mut view, w, h);
+                        }
+                    }
+                    app.trade_tab = crate::game::TradeTab::Resources;
+                    use crate::sim::combat::{Encounter, Stage};
+                    for stage in [Stage::Approach, Stage::Won] {
+                        app.sim.as_mut().unwrap().encounter =
+                            Some(Encounter { band: "the Smoke Kites".into(), attack: 3.0, defense: 3.0, stage, bounty: 1000.0 });
+                        app.screen = Screen::Cockpit;
+                        frame(&ctx, &app, &mut view, w, h);
+                    }
+                    app.sim.as_mut().unwrap().encounter = None;
+                    let sys = app.gal.system(id);
+                    sys.civ = None;
+                    sys.market = None;
                 }
                 // Mid-shuttle.
                 {

@@ -1,10 +1,12 @@
 pub mod civ;
+pub mod combat;
 pub mod commerce;
 pub mod galaxy;
 pub mod balance;
 pub mod cargo;
 pub mod logbuf;
 pub mod people;
+pub mod quest;
 pub mod opts;
 pub mod planet;
 pub mod res;

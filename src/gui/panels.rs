@@ -1078,6 +1078,26 @@ fn trade_port(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         }
     }
     ui.add_space(8.0);
+    section(ui, "WEAPONS AND ARMOUR");
+    let (a, d) = sim.combat_stats();
+    ui.label(format!("Attack {a:.1} (level {}) · Defense {d:.1} (level {}) · battles won {} / lost {}", sim.attack_lvl, sim.defense_lvl, sim.battles_won, sim.battles_lost));
+    if sim.pending_bounty > 0.0 {
+        ui.label(RichText::new(format!("Bounty owed to you: {:.0} cr (paid at any planetary or interstellar port).", sim.pending_bounty)).color(GOOD));
+    }
+    if tier == CivTier::T3 {
+        ui.horizontal(|ui| {
+            use crate::sim::combat::{upgrade_cost, MAX_LEVEL};
+            for (attack, lvl, what) in [(true, sim.attack_lvl, "Attack"), (false, sim.defense_lvl, "Defense")] {
+                let label = if lvl >= MAX_LEVEL { format!("{what} maxed") } else { format!("{what} → level {} ({:.0} cr)", lvl + 1, upgrade_cost(lvl)) };
+                if ui.add_enabled(lvl < MAX_LEVEL && sim.credits >= upgrade_cost(lvl), egui::Button::new(label)).clicked() {
+                    acts.push(Action::BuyUpgrade(attack));
+                }
+            }
+        });
+    } else {
+        ui.label(dim("Weapons and armour are fitted at interstellar (T3) shipyards."));
+    }
+    ui.add_space(8.0);
     section(ui, "HIRE A PILOT");
     match &sim.pilot {
         Some(p) => {
