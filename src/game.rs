@@ -10,7 +10,7 @@ use crate::sim::civ::CivTier;
 use crate::sim::galaxy::Neighbor;
 use crate::sim::save;
 use crate::sim::state::{loc_label, Focus, ShuttleBlock};
-use crate::sim::{fmt_hours, Galaxy, Level, Loc, Res, Sim};
+use crate::sim::{fmt_hours, Galaxy, Good, Level, Loc, Res, Sex, Sim};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -34,6 +34,14 @@ impl Screen {
     }
 }
 
+/// Tabs of the Trade screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeTab {
+    Resources,
+    Cargo,
+    Port,
+}
+
 /// Time-compression steps, in the order `F` cycles through them (0 = pause).
 pub const TIME_SCALES: [u32; 5] = [1, 10, 60, 600, 0];
 
@@ -47,6 +55,7 @@ pub enum Key {
     Right,
     Enter,
     Esc,
+    Tab,
     /// Ctrl+C / window-manager quit shortcut.
     CtrlC,
 }
@@ -58,6 +67,7 @@ pub enum Action {
     SelectShip(usize),
     SetSeed(u64),
     SetOpts(crate::sim::GalaxyOpts),
+    SetSex(Sex),
     NewGame,
     Continue,
     // ---- navigation ----
@@ -118,6 +128,12 @@ pub enum Action {
     Buy(Res),
     Sell(Res),
     RepairHull,
+    SetTradeTab(TradeTab),
+    SetCargoQty(u32),
+    BuyGood(Good),
+    SellGood(Good),
+    RecruitPartner,
+    HirePilot,
     // ---- misc ----
     Save,
 }
@@ -147,6 +163,11 @@ pub struct App {
     pub map_sel: usize,
     pub trade_row: usize,
     pub trade_qty: f64,
+    pub trade_tab: TradeTab,
+    /// Units per cargo buy/sell click.
+    pub cargo_qty: u32,
+    /// The captain's sex for the next new game (title screen).
+    pub title_sex: Sex,
     /// (msg, expiry on the real clock)
     pub flash: Option<(String, f64)>,
     /// Every status message shown — UI flashes and game events, newest last.
@@ -175,6 +196,9 @@ impl App {
             map_sel: 0,
             trade_row: 0,
             trade_qty: 100.0,
+            trade_tab: TradeTab::Resources,
+            cargo_qty: 1,
+            title_sex: Sex::Male,
             flash: None,
             flash_history: Vec::new(),
             log_seen: 0,
@@ -240,7 +264,8 @@ impl App {
     pub fn start_new_game(&mut self, ship_idx: usize) {
         let seed = self.gal.seed;
         self.gal = Galaxy::with_opts(seed, self.gal.opts);
-        let sim = Sim::new_game(seed, ship_idx, &mut self.gal);
+        let mut sim = Sim::new_game(seed, ship_idx, &mut self.gal);
+        sim.player_sex = self.title_sex;
         self.sim = Some(sim);
         self.screen = Screen::Cockpit;
         self.sel_planet = 0;
@@ -367,13 +392,18 @@ impl App {
         self.gal.system_ref(sim.sys_id).civ.as_ref().map(|c| c.tier)
     }
 
-    /// Why trade is unavailable here, or `None` if it is.
+    /// Why trade is unavailable here, or `None` if it is. Pre-space
+    /// peoples still barter goods (the Cargo tab).
     pub fn trade_block_reason(&self) -> Option<&'static str> {
         match self.local_civ() {
-            Some(CivTier::T2) | Some(CivTier::T3) => None,
-            Some(CivTier::T1) => Some("They haven't even left their planet. No trade possible."),
+            Some(_) => None,
             None => Some("No one here to trade with. Just stars and rock."),
         }
+    }
+
+    /// Resources (tanks) trade needs a planetary or interstellar market.
+    pub fn resource_trade_ok(&self) -> bool {
+        matches!(self.local_civ(), Some(CivTier::T2) | Some(CivTier::T3))
     }
 
     /// The selected body as a location (planet, or one of its moons).
@@ -403,6 +433,7 @@ impl App {
             Action::SelectShip(_)
                 | Action::SetSeed(_)
                 | Action::SetOpts(_)
+                | Action::SetSex(_)
                 | Action::NewGame
                 | Action::Continue
                 | Action::Open(Screen::Help)
@@ -418,6 +449,7 @@ impl App {
             Action::SelectShip(i) => self.title_sel = i.min(crate::sim::SHIPS.len() - 1),
             Action::SetSeed(s) => self.gal = Galaxy::with_opts(s, self.gal.opts),
             Action::SetOpts(o) => self.gal = Galaxy::with_opts(self.gal.seed, o),
+            Action::SetSex(x) => self.title_sex = x,
             Action::NewGame => self.start_new_game(self.title_sel),
             Action::Continue => self.continue_game(),
             Action::Open(s) => self.open(s),
@@ -575,21 +607,46 @@ impl App {
             }
             Action::SetTimeScale(ff) => self.set_time_scale(ff),
 
-            Action::TradeSelect(i) => self.trade_row = i.min(Res::ALL.len() - 1),
+            Action::TradeSelect(i) => self.trade_row = i.min(self.trade_rows() - 1),
             Action::TradeStep(d) => {
-                self.trade_row = (self.trade_row as i64 + d as i64).clamp(0, Res::ALL.len() as i64 - 1) as usize
+                self.trade_row = (self.trade_row as i64 + d as i64).clamp(0, self.trade_rows() as i64 - 1) as usize
             }
             Action::TradeQtyScale(f) => self.trade_qty = (self.trade_qty * f).clamp(10.0, 100_000.0),
             Action::SetTradeQty(q) => self.trade_qty = q.clamp(1.0, 1_000_000.0),
             Action::Buy(r) | Action::Sell(r) => {
                 if let Some(why) = self.trade_block_reason() {
                     self.flash(why);
+                } else if !self.resource_trade_ok() {
+                    self.flash("Pre-space peoples only barter goods (the Cargo tab).");
                 } else {
                     let buy = matches!(a, Action::Buy(_));
                     let qty = self.trade_qty;
                     let sim = self.sim.as_mut().unwrap();
                     sim.trade(&mut self.gal, r, buy, qty);
                 }
+            }
+            Action::SetTradeTab(t) => {
+                self.trade_tab = t;
+                self.trade_row = 0;
+            }
+            Action::SetCargoQty(n) => self.cargo_qty = n.clamp(1, 10_000),
+            Action::BuyGood(g) | Action::SellGood(g) => {
+                if let Some(why) = self.trade_block_reason() {
+                    self.flash(why);
+                } else {
+                    let buy = matches!(a, Action::BuyGood(_));
+                    let n = self.cargo_qty;
+                    let sim = self.sim.as_mut().unwrap();
+                    sim.trade_good(&mut self.gal, g, buy, n);
+                }
+            }
+            Action::RecruitPartner => {
+                let sim = self.sim.as_mut().unwrap();
+                sim.recruit_partner(&mut self.gal);
+            }
+            Action::HirePilot => {
+                let sim = self.sim.as_mut().unwrap();
+                sim.hire_pilot(&mut self.gal);
             }
             Action::RepairHull => {
                 let sim = self.sim.as_mut().unwrap();
@@ -600,6 +657,14 @@ impl App {
             }
         }
         self.drain_log();
+    }
+
+    /// Rows in the current Trade tab's list.
+    fn trade_rows(&self) -> usize {
+        match self.trade_tab {
+            TradeTab::Cargo => Good::ALL.len(),
+            _ => Res::ALL.len(),
+        }
     }
 
     fn with_sim(&mut self, f: impl FnOnce(&mut Sim)) {
@@ -748,8 +813,19 @@ impl App {
                 Key::Down => Some(Action::TradeStep(1)),
                 Key::Char('+') | Key::Char('=') => Some(Action::TradeQtyScale(10.0)),
                 Key::Char('-') | Key::Char('_') => Some(Action::TradeQtyScale(0.1)),
-                Key::Char('b') => Some(Action::Buy(Res::ALL[self.trade_row])),
-                Key::Char('s') => Some(Action::Sell(Res::ALL[self.trade_row])),
+                Key::Char('b') => Some(match self.trade_tab {
+                    TradeTab::Cargo => Action::BuyGood(Good::ALL[self.trade_row.min(Good::ALL.len() - 1)]),
+                    _ => Action::Buy(Res::ALL[self.trade_row.min(Res::ALL.len() - 1)]),
+                }),
+                Key::Char('s') => Some(match self.trade_tab {
+                    TradeTab::Cargo => Action::SellGood(Good::ALL[self.trade_row.min(Good::ALL.len() - 1)]),
+                    _ => Action::Sell(Res::ALL[self.trade_row.min(Res::ALL.len() - 1)]),
+                }),
+                Key::Tab => Some(Action::SetTradeTab(match self.trade_tab {
+                    TradeTab::Resources => TradeTab::Cargo,
+                    TradeTab::Cargo => TradeTab::Port,
+                    TradeTab::Port => TradeTab::Resources,
+                })),
                 Key::Char('y') => Some(Action::RepairHull),
                 _ => self.global_key(k),
             },

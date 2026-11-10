@@ -1,7 +1,10 @@
 pub mod civ;
+pub mod commerce;
 pub mod galaxy;
 pub mod balance;
+pub mod cargo;
 pub mod logbuf;
+pub mod people;
 pub mod opts;
 pub mod planet;
 pub mod res;
@@ -14,7 +17,9 @@ pub mod worldgen;
 
 pub use galaxy::Galaxy;
 pub use logbuf::Level;
+pub use cargo::{Good, Hold};
 pub use opts::{Abundance, GalaxyOpts, Risk};
-pub use res::{fmt_daytime, fmt_f1, fmt_hours, fmt_kg, Res, Rgb};
+pub use people::Sex;
+pub use res::{fmt_date, fmt_daytime, fmt_f1, fmt_hours, fmt_kg, Res, Rgb};
 pub use ship::{ShipSpec, SHIPS};
 pub use state::{Loc, Sim};

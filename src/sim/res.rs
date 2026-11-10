@@ -229,13 +229,21 @@ pub fn fmt_hours(h: f64) -> String {
     }
 }
 
-/// In-game seconds → "Day 12 08:34"
+/// In-game seconds → "Year 1 · Day 12 · 08:34" (365-day years).
 pub fn fmt_daytime(t_sec: f64) -> String {
-    let d = (t_sec / 86_400.0) as u64;
-    let rem = t_sec - d as f64 * 86_400.0;
+    let t = t_sec.max(0.0);
+    let days = (t / 86_400.0) as u64;
+    let (y, d) = (days / 365, days % 365);
+    let rem = t - days as f64 * 86_400.0;
     let h = (rem / 3600.0) as u64;
     let m = ((rem % 3600.0) / 60.0) as u64;
-    format!("Day {} {:02}:{:02}", d + 1, h, m)
+    format!("Year {} · Day {} · {:02}:{:02}", y + 1, d + 1, h, m)
+}
+
+/// In-game seconds → "Year 12, Day 140" (no clock: for colony time).
+pub fn fmt_date(t_sec: f64) -> String {
+    let days = (t_sec.max(0.0) / 86_400.0) as u64;
+    format!("Year {}, Day {}", days / 365 + 1, days % 365 + 1)
 }
 
 pub fn fmt_f1(v: f64) -> String {
@@ -244,7 +252,14 @@ pub fn fmt_f1(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Res;
+    use super::*;
+
+    #[test]
+    fn clock_rolls_over_at_365_days() {
+        assert_eq!(fmt_daytime(0.0), "Year 1 · Day 1 · 00:00");
+        assert_eq!(fmt_daytime(365.0 * 86_400.0 + 3_660.0), "Year 2 · Day 1 · 01:01");
+        assert_eq!(fmt_date(364.5 * 86_400.0), "Year 1, Day 365");
+    }
 
     /// Resource labels are drawn in their resource color on a dark theme.
     /// Carbon was once mapped to black and lost its label entirely; keep

@@ -221,6 +221,7 @@ fn handle_keys(ctx: &egui::Context, app: &mut App) {
                 egui::Key::C if modifiers.command => Some(Key::CtrlC),
                 egui::Key::Escape => Some(Key::Esc),
                 egui::Key::Enter => Some(Key::Enter),
+                egui::Key::Tab => Some(Key::Tab),
                 egui::Key::ArrowUp => Some(Key::Up),
                 egui::Key::ArrowDown => Some(Key::Down),
                 egui::Key::ArrowLeft => Some(Key::Left),
@@ -361,7 +362,7 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
                 let what = match civ.tier {
                     crate::sim::civ::CivTier::T3 => "station",
                     crate::sim::civ::CivTier::T2 => "market",
-                    crate::sim::civ::CivTier::T1 => "no trade",
+                    crate::sim::civ::CivTier::T1 => "barter",
                 };
                 ui.label(RichText::new(format!("· {} ({what})", civ.display())).color(CIV));
             }

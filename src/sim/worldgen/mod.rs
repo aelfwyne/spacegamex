@@ -134,7 +134,7 @@ pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool, opts: &GalaxyO
     let civ = derive_civ(&planets);
     let (trade_prices, trade_stock) = market(&mut rng, civ.as_ref());
 
-    StarSystem {
+    let mut sys = StarSystem {
         id,
         pos,
         star,
@@ -143,7 +143,11 @@ pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool, opts: &GalaxyO
         civ,
         trade_stock,
         trade_prices,
-    }
+        market: None,
+    };
+    // Its own RNG stream, so adding cargo markets changed no world.
+    sys.refresh_cargo_market(seed);
+    sys
 }
 
 fn place(b: &mut Proto, host: Host, hz: f64) {

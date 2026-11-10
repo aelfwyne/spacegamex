@@ -65,11 +65,38 @@ pub struct StarSystem {
     pub trade_stock: BTreeMap<Res, f64>,
     /// Local market price (credits/kg).
     pub trade_prices: BTreeMap<Res, f64>,
+    /// Commercial cargo market (any civilisation, even pre-space natives).
+    #[serde(default)]
+    pub market: Option<super::cargo::CargoMarket>,
 }
 
 impl StarSystem {
     pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool, opts: &super::opts::GalaxyOpts) -> Self {
         super::worldgen::generate(seed, id, pos, is_home, opts)
+    }
+
+    /// Population behind the local civilisation (natives or colony).
+    pub fn civ_population(&self) -> f64 {
+        let Some(civ) = &self.civ else { return 0.0 };
+        self.site(civ.seat)
+            .map(|p| match civ.kind {
+                super::civ::CivKind::Natives => p.natives.as_ref().map(|n| n.population).unwrap_or(0.0),
+                super::civ::CivKind::Colony => p.colony.as_ref().map(|c| c.population).unwrap_or(0.0),
+            })
+            .unwrap_or(0.0)
+    }
+
+    /// (Re)build the cargo market from the civilisation, if there is none
+    /// yet (new systems, and systems from saves made before markets).
+    pub fn refresh_cargo_market(&mut self, seed: u64) {
+        if self.market.is_some() {
+            return;
+        }
+        if let Some(civ) = &self.civ {
+            // Population scale: ~0 for a hamlet, ~1 for a billion.
+            let size = (self.civ_population().max(1.0).log10() / 9.0).clamp(0.0, 1.0);
+            self.market = Some(super::cargo::CargoMarket::generate(seed, self.id, civ, size));
+        }
     }
 
     /// Every dockable body: planets, belts, and the moons of gas giants.

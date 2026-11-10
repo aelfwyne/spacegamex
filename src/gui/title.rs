@@ -5,7 +5,7 @@ use super::theme::*;
 use super::View;
 use crate::game::{Action, App, Screen};
 use crate::sim::save;
-use crate::sim::{fmt_daytime, fmt_kg, Abundance, GalaxyOpts, Risk, SHIPS};
+use crate::sim::{fmt_daytime, fmt_kg, Abundance, GalaxyOpts, Risk, Sex, SHIPS};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, RichText, Sense, Shape, Stroke, Ui};
 
 /// The galaxy option rows under the title buttons. Each change rebuilds the
@@ -33,6 +33,26 @@ fn galaxy_options(ui: &mut Ui, opts: GalaxyOpts, acts: &mut Vec<Action>) {
     row(ui, "Resources", res);
     row(ui, "Civilization", civ);
     row(ui, "Risk", risk);
+}
+
+/// The captain's sex (matters for recruiting a partner and founding a
+/// colony with one).
+fn captain_row(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    const LABEL_W: f32 = 110.0;
+    const BTN_W: f32 = 96.0;
+    let row_w = LABEL_W + 3.0 * BTN_W + 3.0 * ui.spacing().item_spacing.x;
+    ui.horizontal(|ui| {
+        ui.add_space(((ui.available_width() - row_w) / 2.0).max(0.0));
+        ui.add_sized(vec2(LABEL_W, 24.0), egui::Label::new(dim("Captain")));
+        for x in Sex::ALL {
+            let sel = app.title_sex == x;
+            let b = egui::Button::selectable(sel, RichText::new(x.name()).color(if sel { KEY } else { TEXT })).min_size(vec2(BTN_W, 24.0));
+            if ui.add(b).on_hover_text("Your captain. A partner recruited at a port is of the opposite sex.").clicked() && !sel {
+                acts.push(Action::SetSex(x));
+            }
+        }
+        ui.add_space(BTN_W);
+    });
 }
 
 /// A simple vector silhouette per hull, pointing right.
@@ -83,7 +103,7 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
         ui.vertical_centered(|ui| {
             ui.add_space((rect.height() * 0.06).min(50.0));
             ui.label(RichText::new("COLONIA  GALACTICA").size(56.0).strong().color(ACCENT));
-            ui.label(RichText::new("One ship. One infinite galaxy. No respawn.").size(17.0).color(DIM));
+            ui.label(RichText::new("Survive the drift. Found a colony. Grow it to a million.").size(17.0).color(DIM));
             ui.add_space(18.0);
         });
 
@@ -113,6 +133,7 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                                 ("Reactor", format!("{:.0} MW", sh.reactor_mw)),
                                 ("Drones", format!("{} × {:.0} kg/h", sh.drones, sh.drone_yield)),
                                 ("Fuel tank", format!("{} kg", fmt_kg(sh.tanks[0].1))),
+                                ("Cargo hold", format!("{:.0} t", sh.cargo_t)),
                                 ("FTL", format!("{:.0} ly/h", sh.ftl_speed)),
                             ] {
                                 ui.label(dim(k));
@@ -172,6 +193,7 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             });
             ui.add_space(14.0);
             galaxy_options(ui, app.gal.opts, acts);
+            captain_row(ui, app, acts);
             ui.add_space(8.0);
             ui.label(dim("Pick a ship with 1–3 or the arrow keys, or double-click a card."));
             ui.add_space(6.0);

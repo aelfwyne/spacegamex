@@ -3,10 +3,10 @@
 use super::paint;
 use super::theme::*;
 use super::{power_budget, View};
-use crate::game::{Action, App, Screen};
+use crate::game::{Action, App, Screen, TradeTab};
 use crate::sim::civ::{self, CivTier};
 use crate::sim::state::{FaultKind, Focus};
-use crate::sim::{fmt_f1, fmt_hours, fmt_kg, Loc, Res, ShipSpec, Sim};
+use crate::sim::{fmt_f1, fmt_hours, fmt_kg, Good, Loc, Res, ShipSpec, Sim};
 use eframe::egui::{self, vec2, Color32, RichText, Sense, Ui};
 
 fn faulted(sim: &Sim, k: FaultKind) -> bool {
@@ -674,6 +674,27 @@ pub fn resources(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             ui.end_row();
         }
     });
+    ui.add_space(8.0);
+    cargo_hold(ui, sim);
+}
+
+/// The commercial cargo hold, listed.
+pub fn cargo_hold(ui: &mut Ui, sim: &Sim) {
+    section(ui, "CARGO HOLD");
+    let cap = sim.ship().cargo_t;
+    bar(ui, sim.hold.mass_t() / cap.max(1e-9), format!("{:.1} / {cap:.0} t", sim.hold.mass_t()), 260.0);
+    if sim.hold.is_empty() {
+        ui.label(dim("Empty. Buy goods and colony supplies on the Trade screen's Cargo tab."));
+        return;
+    }
+    egui::Grid::new("hold").num_columns(3).striped(true).spacing([14.0, 2.0]).show(ui, |ui| {
+        for (g, n) in &sim.hold.units {
+            ui.label(RichText::new(g.name()).color(if g.is_supply() { ACCENT } else { TEXT })).on_hover_text(g.desc());
+            ui.label(format!("{n}"));
+            ui.label(dim(format!("{:.1} t", g.mass_t() * *n as f64)));
+            ui.end_row();
+        }
+    });
 }
 
 // ------------------------------------------------------------ crew
@@ -682,11 +703,36 @@ pub fn crew(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     let sim = app.sim();
     let spec = sim.ship();
     back_row(ui, "CREW & PASSENGERS", acts);
+    section(ui, "CAPTAIN");
+    egui::Grid::new("captain").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
+        kv(ui, "Name", RichText::new(sim.player_name()).strong());
+        kv(ui, "Sex", sim.player_sex.name().into());
+        kv(ui, "Age", format!("{:.0}", sim.player_age().floor()).into());
+        kv(ui, "Retires at", format!("about {:.0}", sim.retire_age.round()).into());
+        let partner = match &sim.spouse {
+            Some(sp) => format!("{} ({}, {})", sp.name, sp.sex.name().to_lowercase(), sp.species_name()),
+            None => "none (recruit one at a port)".into(),
+        };
+        kv(ui, "Partner", partner.into());
+        if let Some(p) = &sim.pilot {
+            kv(ui, "Pilot", format!("{} (skill {})", p.name, p.skill).into());
+        }
+    });
+    ui.add_space(6.0);
     ui.label(RichText::new(format!("{} — crew complement {}", spec.name, spec.crew)).strong());
     egui::Grid::new("crew").num_columns(2).spacing([12.0, 2.0]).show(ui, |ui| {
         for (i, n) in sim.crew.names.iter().enumerate() {
             ui.label(dim(format!("{:>2}.", i + 1)));
-            ui.label(n);
+            let role = if i == 0 {
+                " (captain)"
+            } else if sim.spouse.as_ref().is_some_and(|r| &r.name == n) {
+                " (partner)"
+            } else if sim.pilot.as_ref().is_some_and(|r| &r.name == n) {
+                " (pilot)"
+            } else {
+                ""
+            };
+            ui.label(format!("{n}{role}"));
             ui.end_row();
         }
     });
@@ -857,20 +903,42 @@ pub fn trade(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         ui.label("Nobody to trade with.");
         return;
     };
-    let t3 = cv.tier == CivTier::T3;
     ui.label(RichText::new(format!("{} — {}", cv.display(), cv.tier.name())).color(CIV).strong().size(17.0));
     ui.label(dim(format!("Seat: {}{}", crate::sim::state::loc_label(cv.seat, sys), if cv.small { " (small outpost market)" } else { "" })));
-    ui.label(dim(if t3 {
-        "Full interstellar station: buy and sell anything; shipyard hull repair at 8 cr per hull point."
-    } else if cv.tier == CivTier::T2 {
-        "Planetary market: they buy raw materials (cheaply) and sell limited processed stock."
-    } else {
-        "They have not left their world. Observation only."
-    }));
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("Credits: {:.0} cr", sim.credits)).color(GOOD).strong());
+        for (t, label) in [(TradeTab::Resources, "Resources"), (TradeTab::Cargo, "Cargo"), (TradeTab::Port, "Port")] {
+            if ui.add(egui::Button::selectable(app.trade_tab == t, RichText::new(label).strong())).clicked() {
+                acts.push(Action::SetTradeTab(t));
+            }
+        }
+        ui.label(dim("[Tab] next tab"));
         ui.separator();
+        ui.label(RichText::new(format!("Credits: {:.0} cr", sim.credits)).color(GOOD).strong());
+    });
+    ui.separator();
+    match app.trade_tab {
+        TradeTab::Resources => trade_resources(ui, app, acts),
+        TradeTab::Cargo => trade_cargo(ui, app, acts),
+        TradeTab::Port => trade_port(ui, app, acts),
+    }
+}
+
+fn trade_resources(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    let sim = app.sim();
+    let sys = app.gal.system_ref(sim.sys_id);
+    let Some(cv) = &sys.civ else { return };
+    let t3 = cv.tier == CivTier::T3;
+    if !app.resource_trade_ok() {
+        ui.label(dim("They have not left their world and do not deal in bulk resources. They will barter goods: see the Cargo tab."));
+        return;
+    }
+    ui.label(dim(if t3 {
+        "Full interstellar station: buy and sell anything; shipyard hull repair at 8 cr per hull point."
+    } else {
+        "Planetary market: they buy raw materials (cheaply) and sell limited processed stock."
+    }));
+    ui.horizontal(|ui| {
         ui.label("Quantity");
         let mut q = app.trade_qty;
         if ui.add(egui::DragValue::new(&mut q).range(1.0..=1_000_000.0).speed(10.0).suffix(" kg")).changed() {
@@ -923,6 +991,107 @@ pub fn trade(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             ui.end_row();
         }
     });
+}
+
+fn trade_cargo(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    let sim = app.sim();
+    let sys = app.gal.system_ref(sim.sys_id);
+    let Some(market) = &sys.market else {
+        ui.label(dim("No cargo market here."));
+        return;
+    };
+    let cap = sim.ship().cargo_t;
+    let used = sim.hold.mass_t();
+    ui.horizontal(|ui| {
+        bar(ui, used / cap.max(1e-9), format!("Hold {used:.1} / {cap:.0} t"), 220.0);
+        ui.separator();
+        ui.label("Units");
+        let mut q = app.cargo_qty;
+        if ui.add(egui::DragValue::new(&mut q).range(1..=10_000).speed(1.0)).changed() {
+            acts.push(Action::SetCargoQty(q));
+        }
+        for preset in [1u32, 5, 10, 50] {
+            if ui.selectable_label(app.cargo_qty == preset, preset.to_string()).clicked() {
+                acts.push(Action::SetCargoQty(preset));
+            }
+        }
+    });
+    ui.label(dim("Prices are per unit. Every market prices goods differently: buy where they are cheap, sell where they are wanted."));
+    ui.add_space(4.0);
+    egui::Grid::new("cargo_market").num_columns(8).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+        for h in ["Good", "Mass", "Aboard", "Buy at", "Sell at", "Stock", "", ""] {
+            ui.label(dim(h));
+        }
+        ui.end_row();
+        for (i, g) in Good::ALL.iter().enumerate() {
+            let have = sim.hold.get(*g);
+            let buy = market.buy_price(*g);
+            let sell = market.sell_price(*g);
+            if buy.is_none() && sell.is_none() && have == 0 {
+                continue;
+            }
+            let sel = app.trade_tab == TradeTab::Cargo && i == app.trade_row;
+            let col = if g.is_supply() { ACCENT } else { TEXT };
+            if ui.selectable_label(sel, RichText::new(g.name()).color(col)).on_hover_text(g.desc()).clicked() {
+                acts.push(Action::TradeSelect(i));
+            }
+            ui.label(dim(format!("{:.1} t", g.mass_t())));
+            ui.label(if have > 0 { have.to_string() } else { "—".into() });
+            ui.label(buy.map(|p| format!("{p:.0}")).unwrap_or_else(|| "—".into()));
+            ui.label(sell.map(|p| format!("{p:.0}")).unwrap_or_else(|| "—".into()));
+            let stock = market.offers.get(g).map(|o| o.stock).unwrap_or(0);
+            ui.label(if buy.is_some() { stock.to_string() } else { "—".into() });
+            if ui.add_enabled(buy.is_some(), egui::Button::new("Buy").small()).on_hover_text("[B] on the selected row").clicked() {
+                acts.push(Action::TradeSelect(i));
+                acts.push(Action::BuyGood(*g));
+            }
+            if ui.add_enabled(sell.is_some() && have > 0, egui::Button::new("Sell").small()).on_hover_text("[S] on the selected row").clicked() {
+                acts.push(Action::TradeSelect(i));
+                acts.push(Action::SellGood(*g));
+            }
+            ui.end_row();
+        }
+    });
+}
+
+fn trade_port(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    let sim = app.sim();
+    let Some(tier) = sim.port_tier(&app.gal) else {
+        ui.label(dim("Pre-space peoples have no port: nobody to recruit or hire here."));
+        return;
+    };
+    section(ui, "RECRUIT A PARTNER");
+    match &sim.spouse {
+        Some(sp) => {
+            ui.label(format!("{} ({}, {}) is aboard as your partner.", sp.name, sp.sex.name().to_lowercase(), sp.species_name()));
+        }
+        None => {
+            ui.label(dim(format!(
+                "Look for a {} partner willing to leave with you. A partner lets a single captain found a colony, and helps with every job aboard a one-person ship (+10%). A native partner makes the colony Hybrid and needs a Genetic Modification Kit for children.",
+                sim.player_sex.opposite().name().to_lowercase()
+            )));
+            let cost = crate::sim::commerce::recruit_cost(tier);
+            let chance = if tier == CivTier::T3 { "about 1 in 2" } else { "about 1 in 3" };
+            if ui.add_enabled(sim.credits >= cost, egui::Button::new(format!("Search the port ({cost:.0} cr, 1 h, {chance})"))).clicked() {
+                acts.push(Action::RecruitPartner);
+            }
+        }
+    }
+    ui.add_space(8.0);
+    section(ui, "HIRE A PILOT");
+    match &sim.pilot {
+        Some(p) => {
+            ui.label(format!("Pilot {} (skill {}) flies for you: better odds in battle and when fleeing.", p.name, p.skill));
+        }
+        None => {
+            ui.label(dim("A combat pilot improves your odds against pirates, especially when running."));
+            let cost = crate::sim::commerce::pilot_cost(tier);
+            let skill = if tier == CivTier::T3 { "skill 2–3" } else { "skill 1–2" };
+            if ui.add_enabled(sim.credits >= cost, egui::Button::new(format!("Hire a pilot ({cost:.0} cr, {skill})"))).clicked() {
+                acts.push(Action::HirePilot);
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------ help

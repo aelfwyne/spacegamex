@@ -48,6 +48,8 @@ pub struct ShipSpec {
     pub move_fuel_per_au: f64, // kg H2 per AU
 
     pub credits: f64,
+    /// Commercial cargo hold (tonnes).
+    pub cargo_t: f64,
 
     pub tanks: [(Res, f64); 11],
     /// Starting stock as a fraction of capacity.
@@ -81,6 +83,7 @@ const SOLO: ShipSpec = ShipSpec {
     move_time_per_au: 0.15,
     move_fuel_per_au: 0.5,
     credits: 2_000.0,
+    cargo_t: 8.0,
     tanks: [
         (Res::H2, 5_000.0),
         (Res::Ice, 2_000.0),
@@ -112,8 +115,8 @@ const SOLO: ShipSpec = ShipSpec {
 const COMPANY: ShipSpec = ShipSpec {
     key: "COMPANY",
     name: "Cargomaster 'Providence'",
-    blurb: "Company ship, crew of five. Real industrial capacity — mining, fab and fuel on a proper scale.",
-    crew: 5,
+    blurb: "Company ship, crew of ten. Real industrial capacity, and a hold big enough to found a small colony.",
+    crew: 10,
     pax: 0,
     hull: 250.0,
     reactor_mw: 250.0,
@@ -136,6 +139,7 @@ const COMPANY: ShipSpec = ShipSpec {
     move_time_per_au: 0.18,
     move_fuel_per_au: 1.0,
     credits: 8_000.0,
+    cargo_t: 80.0,
     tanks: [
         (Res::H2, 12_000.0),
         (Res::Ice, 5_000.0),
@@ -167,7 +171,7 @@ const COMPANY: ShipSpec = ShipSpec {
 const COLONY: ShipSpec = ShipSpec {
     key: "COLONY",
     name: "Ark 'Hesperide'",
-    blurb: "Colony ark: 10 crew, 500 sleeping passengers. Enormous industrial plant — and an enormous mouth to feed. The hardest way to survive.",
+    blurb: "Colony ark: 10 crew, 500 sleeping passengers, and a full colony kit in the hold. Enormous industrial plant, and an enormous mouth to feed.",
     crew: 10,
     pax: 500,
     hull: 600.0,
@@ -191,6 +195,7 @@ const COLONY: ShipSpec = ShipSpec {
     move_time_per_au: 0.22,
     move_fuel_per_au: 2.0,
     credits: 25_000.0,
+    cargo_t: 600.0,
     tanks: [
         (Res::H2, 40_000.0),
         (Res::Ice, 20_000.0),

@@ -113,7 +113,10 @@ pub fn load() -> Result<(Sim, Galaxy), String> {
         ));
     }
     let mut galaxy = Galaxy::with_opts(file.seed, file.opts);
-    let systems: HashMap<u64, StarSystem> = file.systems.into_iter().collect();
+    let mut systems: HashMap<u64, StarSystem> = file.systems.into_iter().collect();
+    for sys in systems.values_mut() {
+        sys.refresh_cargo_market(file.seed);
+    }
     galaxy.cache = systems;
     // Regenerate what the save left out but the game will look up at once:
     // where we are, where we are going, and the local neighbourhood.

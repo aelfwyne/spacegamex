@@ -6,7 +6,9 @@
 use super::civ::{CivKind, CivTier};
 use super::galaxy::{Galaxy, Neighbor};
 use super::logbuf::{Level, Log};
+use super::cargo::Hold;
 use super::opts::GalaxyOpts;
+use super::people::Sex;
 use super::res::{Inventory, Res};
 use super::ship::ShipSpec;
 use super::system::StarSystem;
@@ -166,6 +168,32 @@ pub struct CrewInfo {
     pub morale: f64,
 }
 
+/// Someone signed on at a port: the captain's partner, or a combat pilot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Recruit {
+    pub name: String,
+    pub sex: Sex,
+    /// Native species name; None for a human.
+    pub species: Option<String>,
+    /// Pilot skill 1..=3 (partners: 0).
+    #[serde(default)]
+    pub skill: u8,
+}
+
+impl Recruit {
+    pub fn species_name(&self) -> &str {
+        self.species.as_deref().unwrap_or("Human")
+    }
+}
+
+fn default_birth_y() -> f64 {
+    -30.0
+}
+
+fn default_retire_age() -> f64 {
+    70.0
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stats {
     pub jumps: u32,
@@ -276,6 +304,27 @@ pub struct Sim {
     pub repairing_hull: bool,
     #[serde(default)]
     pub repairing_wear: bool,
+
+    // ---- the captain ----
+    /// The captain is `crew.names[0]`.
+    #[serde(default)]
+    pub player_sex: Sex,
+    /// Birth date in game years (negative: before the game began).
+    #[serde(default = "default_birth_y")]
+    pub player_birth_y: f64,
+    /// Age at which the captain retires and a successor takes over.
+    #[serde(default = "default_retire_age")]
+    pub retire_age: f64,
+    /// The captain's partner, recruited at a port.
+    #[serde(default)]
+    pub spouse: Option<Recruit>,
+    /// A hired combat pilot.
+    #[serde(default)]
+    pub pilot: Option<Recruit>,
+
+    // ---- commerce ----
+    #[serde(default)]
+    pub hold: Hold,
 }
 
 fn poisson(rng: &mut StdRng, lambda: f64) -> u32 {
@@ -694,12 +743,17 @@ impl Sim {
     /// Full-crew drone output, kg/h (ship × the Resources option).
     pub fn drone_rate(&self) -> f64 {
         let spec = self.ship();
-        spec.drones as f64 * spec.drone_yield * self.opts.drone_mult()
+        spec.drones as f64 * spec.drone_yield * self.opts.drone_mult() * self.crew_bonus()
+    }
+
+    /// A partner aboard the single-crew Keelclipper helps with everything.
+    pub fn crew_bonus(&self) -> f64 {
+        if self.ship().crew == 1 && self.spouse.is_some() { 1.1 } else { 1.0 }
     }
 
     /// Scoop H2+N2 kg/h at a solar-mass G star (ship × Resources option).
     pub fn scoop_rate(&self) -> f64 {
-        self.ship().scoop_rate * self.opts.scoop_mult()
+        self.ship().scoop_rate * self.opts.scoop_mult() * self.crew_bonus()
     }
 
     /// Scale for the rate of negative random events (the Risk option).
@@ -727,13 +781,13 @@ impl Sim {
         // hourly rate for a sliver of damage.
         if self.repair_on && self.repairing_hull && self.hull < hmax && self.inv.get(Res::Mat) > 0.0 {
             let need = (hmax - self.hull) / 0.5 * 0.8;
-            let use_mat = (0.8 * dt_h).min(need).min(self.inv.get(Res::Mat));
+            let use_mat = (0.8 * self.crew_bonus() * dt_h).min(need).min(self.inv.get(Res::Mat));
             self.inv.take(Res::Mat, use_mat);
             self.hull = (self.hull + (use_mat / 0.8) * 0.5).min(hmax);
         }
         if self.repair_on && self.repairing_wear && self.ftl_wear > 0.0 && self.inv.get(Res::Mat) > 0.0 {
             let need = self.ftl_wear / 0.25 * 1.5;
-            let use_mat = (1.5 * dt_h).min(need).min(self.inv.get(Res::Mat));
+            let use_mat = (1.5 * self.crew_bonus() * dt_h).min(need).min(self.inv.get(Res::Mat));
             self.inv.take(Res::Mat, use_mat);
             self.ftl_wear = (self.ftl_wear - (use_mat / 1.5) * 0.25).max(0.0);
         }
@@ -814,7 +868,24 @@ impl Sim {
             opts: gal.opts,
             repairing_hull: false,
             repairing_wear: false,
+            player_sex: Sex::Male,
+            player_birth_y: 0.0,
+            retire_age: 70.0,
+            spouse: None,
+            pilot: None,
+            hold: Hold::default(),
         };
+        // The captain's age and retirement: their own stream, so adding
+        // them changed nothing else about a seed.
+        let mut prng = derive(seed, 0x00ca_97a1);
+        sim.player_birth_y = -prng.random_range(25.0..35.0);
+        sim.retire_age = prng.random_range(60.0..80.0);
+        // The Ark sails with everything its colony will need.
+        if spec.pax > 0 {
+            for (g, n) in super::cargo::colony_kit((spec.pax + spec.crew) as f64, true) {
+                sim.hold.add(g, n);
+            }
+        }
 
         sim.log.push(0.0, Level::Info, format!("{} docked at {} ({}).", spec.name, star_name, catalog));
         sim.log.push(0.0, Level::Info, "Objective: survive. Scoop fuel, mine, process, jump. The galaxy does not care.");
@@ -1549,7 +1620,7 @@ impl Sim {
                 Focus::Idle => &[],
                 _ => &[&REC_O2, &REC_WATER, &REC_FOOD, &REC_MAT, &REC_MED],
             };
-            let mut budget = spec.fab_rate * brownout * morale_eff * dt_h; // raw-kg
+            let mut budget = spec.fab_rate * self.crew_bonus() * brownout * morale_eff * dt_h; // raw-kg
             // Buffer refills are earned from the *mining surplus*: the
             // drones' nominal yield minus the population's raw draw, halved
             // (the other half stockpiles raws). Without the cap, a 20 h
@@ -1738,6 +1809,12 @@ impl Sim {
                 self.debt_crew -= 1.0;
                 let name_lost = self.crew.names.pop().unwrap_or_else(|| "crew member".into());
                 self.crew.count -= 1;
+                if self.spouse.as_ref().is_some_and(|r| r.name == name_lost) {
+                    self.spouse = None;
+                }
+                if self.pilot.as_ref().is_some_and(|r| r.name == name_lost) {
+                    self.pilot = None;
+                }
                 self.stats.crew_lost += 1;
                 if self.crew.count > 0 {
                     self.crew.health = 55.0;
