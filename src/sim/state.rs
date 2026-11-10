@@ -262,6 +262,12 @@ pub struct Sim {
     /// The galaxy options this game was started with (title screen).
     #[serde(default)]
     pub opts: GalaxyOpts,
+    /// Repair hysteresis: a repair starts once a whole percent is lost
+    /// and runs until the damage is gone, instead of nibbling every tick.
+    #[serde(default)]
+    pub repairing_hull: bool,
+    #[serde(default)]
+    pub repairing_wear: bool,
 }
 
 fn poisson(rng: &mut StdRng, lambda: f64) -> u32 {
@@ -623,6 +629,37 @@ impl Sim {
         self.opts.risk.event_mult()
     }
 
+    /// Nanobot repair of hull and FTL wear, paid in MAT.
+    fn repair_hull_and_wear(&mut self, dt_h: f64, hmax: f64) {
+        // Start only once a whole percent is lost (99.0%, not 99.9%), then
+        // finish the job: trickle damage (radiation through shields) is
+        // fixed in batches instead of a constant on/off flicker.
+        if self.hull <= hmax * 0.99 {
+            self.repairing_hull = true;
+        } else if self.hull >= hmax {
+            self.repairing_hull = false;
+        }
+        if self.ftl_wear >= 1.0 {
+            self.repairing_wear = true;
+        } else if self.ftl_wear <= 0.0 {
+            self.repairing_wear = false;
+        }
+        // Spend only the MAT the damage actually needs, never the full
+        // hourly rate for a sliver of damage.
+        if self.repair_on && self.repairing_hull && self.hull < hmax && self.inv.get(Res::Mat) > 0.0 {
+            let need = (hmax - self.hull) / 0.5 * 0.8;
+            let use_mat = (0.8 * dt_h).min(need).min(self.inv.get(Res::Mat));
+            self.inv.take(Res::Mat, use_mat);
+            self.hull = (self.hull + (use_mat / 0.8) * 0.5).min(hmax);
+        }
+        if self.repair_on && self.repairing_wear && self.ftl_wear > 0.0 && self.inv.get(Res::Mat) > 0.0 {
+            let need = self.ftl_wear / 0.25 * 1.5;
+            let use_mat = (1.5 * dt_h).min(need).min(self.inv.get(Res::Mat));
+            self.inv.take(Res::Mat, use_mat);
+            self.ftl_wear = (self.ftl_wear - (use_mat / 1.5) * 0.25).max(0.0);
+        }
+    }
+
     pub fn t_h(&self) -> f64 {
         self.t / 3600.0
     }
@@ -696,6 +733,8 @@ impl Sim {
             last_hull_source: "—".into(),
             rng_step: 0,
             opts: gal.opts,
+            repairing_hull: false,
+            repairing_wear: false,
         };
 
         sim.log.push(0.0, Level::Info, format!("{} docked at {} ({}).", spec.name, star_name, catalog));
@@ -1787,16 +1826,7 @@ impl Sim {
         }
 
         // ---------- hull & FTL wear repair ----------
-        if self.repair_on && self.hull < hmax && self.inv.get(Res::Mat) > 0.0 {
-            let use_mat = (0.8 * dt_h).min(self.inv.get(Res::Mat));
-            self.inv.take(Res::Mat, use_mat);
-            self.hull = (self.hull + (use_mat / 0.8) * 0.5).min(hmax);
-        }
-        if self.repair_on && self.ftl_wear > 0.0 && self.inv.get(Res::Mat) > 0.0 {
-            let use_mat = (1.5 * dt_h).min(self.inv.get(Res::Mat));
-            self.inv.take(Res::Mat, use_mat);
-            self.ftl_wear = (self.ftl_wear - (use_mat / 1.5) * 0.25).max(0.0);
-        }
+        self.repair_hull_and_wear(dt_h, hmax);
 
         // ---------- morale ----------
         let good = self.inv.fraction(Res::Oxygen) > 0.5
@@ -2869,6 +2899,39 @@ mod fix_tests {
         };
         let (t, n, r) = (faults(Risk::Tourist), faults(Risk::Normal), faults(Risk::Risky));
         assert!(t < n && n < r, "tourist {t}, normal {n}, risky {r}");
+    }
+
+    /// Repair waits for a whole percent of damage, then runs to full,
+    /// spending MAT only for the damage it fixes.
+    #[test]
+    fn repair_waits_for_a_whole_percent_then_finishes() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 0, &mut gal);
+        let hmax = sim.ship().hull;
+        sim.repair_on = true;
+        sim.ftl_wear = 0.0;
+        let mat = |s: &Sim| s.inv.get(Res::Mat);
+
+        // A sliver of damage: nothing is spent.
+        sim.hull = hmax * 0.995;
+        let before = mat(&sim);
+        sim.repair_hull_and_wear(0.1, hmax);
+        assert_eq!(mat(&sim), before);
+        assert_eq!(sim.hull, hmax * 0.995);
+
+        // A whole percent: repair starts and keeps going above 99%.
+        sim.hull = hmax * 0.99;
+        sim.repair_hull_and_wear(0.01, hmax);
+        assert!(sim.repairing_hull && sim.hull > hmax * 0.99 && sim.hull < hmax);
+        let before = mat(&sim);
+        let missing = hmax - sim.hull;
+        for _ in 0..10_000 {
+            sim.repair_hull_and_wear(0.01, hmax);
+        }
+        assert_eq!(sim.hull, hmax);
+        assert!(!sim.repairing_hull || sim.hull >= hmax);
+        let spent = before - mat(&sim);
+        assert!((spent - missing / 0.5 * 0.8).abs() < 1e-6, "spent {spent} for {missing} hull");
     }
 
     /// Per-step random rolls must not repeat just because several steps
