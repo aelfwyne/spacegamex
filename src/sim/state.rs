@@ -346,6 +346,13 @@ pub struct Sim {
     /// Artifacts kept for their powers.
     #[serde(default)]
     pub artifacts: Vec<super::quest::Artifact>,
+    #[serde(default)]
+    pub relics: Vec<super::quest::Relic>,
+    #[serde(default)]
+    pub quests: Vec<super::quest::Quest>,
+    /// Ids of jobs finished or dropped (never offered again).
+    #[serde(default)]
+    pub done_quests: Vec<u64>,
 
     // ---- colony ----
     /// Colony mode: the captain is at the colony and the ship is mothballed.
@@ -916,6 +923,9 @@ impl Sim {
             encounter: None,
             in_colony: false,
             artifacts: vec![],
+            relics: vec![],
+            quests: vec![],
+            done_quests: vec![],
             colony: None,
             ship_dormant: false,
             victory_seen: false,
@@ -1645,9 +1655,14 @@ impl Sim {
             let rate = drones * spec.drone_yield * self.opts.drone_mult() * 2.0 * brownout * morale_eff * dt_h;
             let mut found_cr = 0.0;
             let mut done: Option<String> = None;
+            let mut relic: Option<String> = None;
             if let Some(sv) = sys.site_mut(here).and_then(|p| p.salvage.as_mut())
                 && sv.remaining >= 1.0
             {
+                // Ruins hold relics: now and then the drones turn one up.
+                if rng.random_bool((0.015 * dt_h).min(0.5)) {
+                    relic = Some(sv.what.clone());
+                }
                 let kg = rate.min(sv.remaining);
                 sv.remaining -= kg;
                 let mat = self.inv.add(Res::Mat, kg * 0.5);
@@ -1659,6 +1674,9 @@ impl Sim {
                 if sv.remaining < 1.0 {
                     done = Some(sv.what.clone());
                 }
+            }
+            if let Some(place) = relic {
+                self.find_relic(&mut rng, &place.to_lowercase());
             }
             if found_cr > 0.0 {
                 self.credits += found_cr;

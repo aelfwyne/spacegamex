@@ -142,6 +142,12 @@ fn chart(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
         if dest {
             painter.circle_stroke(p, base + 11.0, Stroke::new(1.5, ACCENT));
         }
+        // Quest targets: a gold diamond.
+        if sim.quests.iter().any(|q| q.target_sys() == n.id) {
+            let d = base + 6.0;
+            let pts = vec![p + vec2(0.0, -d), p + vec2(d, 0.0), p + vec2(0.0, d), p + vec2(-d, 0.0), p + vec2(0.0, -d)];
+            painter.add(egui::Shape::line(pts, Stroke::new(1.5, Color32::from_rgb(255, 205, 90))));
+        }
         if sel || dest || n.civ.is_some() || label_all {
             let col = if sel { KEY } else if visited { DIM } else { TEXT };
             painter.text(p + vec2(base + 6.0, -base - 2.0), Align2::LEFT_BOTTOM, &n.star_name, FontId::proportional(12.0), col);

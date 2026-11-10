@@ -43,6 +43,7 @@ pub enum TradeTab {
     Resources,
     Cargo,
     Port,
+    Jobs,
 }
 
 /// Tabs of the colony panel.
@@ -170,6 +171,13 @@ pub enum Action {
     EndInVictory,
     /// Victory: give the colony up and keep flying.
     VictoryAbandon,
+    // ---- quests ----
+    AcceptQuest(u64),
+    DropQuest(u64),
+    SearchArtifact,
+    /// (quest, keep the artifact)
+    CompleteQuest(u64, bool),
+    SellRelic(usize),
     // ---- pirates ----
     Encounter(crate::sim::combat::Choice),
     // ---- misc ----
@@ -213,6 +221,8 @@ pub struct App {
     last_colony_save: f64,
     /// Founding asks twice.
     pub confirm_found: bool,
+    /// Jobs on offer at the current port (refreshed when trade opens).
+    pub board: Vec<crate::sim::quest::Quest>,
     /// (msg, expiry on the real clock)
     pub flash: Option<(String, f64)>,
     /// Every status message shown — UI flashes and game events, newest last.
@@ -248,6 +258,7 @@ impl App {
             person: None,
             last_colony_save: 0.0,
             confirm_found: false,
+            board: vec![],
             flash: None,
             flash_history: Vec::new(),
             log_seen: 0,
@@ -677,6 +688,32 @@ impl App {
             Action::SetTradeTab(t) => {
                 self.trade_tab = t;
                 self.trade_row = 0;
+                self.refresh_board();
+            }
+            Action::AcceptQuest(id) => {
+                self.refresh_board();
+                if let Some(q) = self.board.iter().find(|q| q.id == id).cloned() {
+                    self.sim.as_mut().unwrap().accept_quest(q);
+                }
+                self.refresh_board();
+            }
+            Action::DropQuest(id) => {
+                self.with_sim(|s| s.drop_quest(id));
+                self.refresh_board();
+            }
+            Action::SearchArtifact => {
+                let sim = self.sim.as_mut().unwrap();
+                sim.search_artifact(&mut self.gal);
+            }
+            Action::CompleteQuest(id, keep) => {
+                self.with_sim(|s| {
+                    s.complete_quest(id, keep);
+                });
+                self.refresh_board();
+            }
+            Action::SellRelic(i) => {
+                let sim = self.sim.as_mut().unwrap();
+                sim.sell_relic(&self.gal, i);
             }
             Action::SetCargoQty(n) => self.cargo_qty = n.clamp(1, 10_000),
             Action::BuyGood(g) | Action::SellGood(g) => {
@@ -822,6 +859,13 @@ impl App {
         self.drain_log();
     }
 
+    pub fn refresh_board(&mut self) {
+        self.board = match self.sim.as_ref() {
+            Some(sim) => sim.job_board(&mut self.gal),
+            None => vec![],
+        };
+    }
+
     /// Rows in the current Trade tab's list.
     fn trade_rows(&self) -> usize {
         match self.trade_tab {
@@ -894,7 +938,10 @@ impl App {
                 self.screen = Screen::Map;
             }
             Screen::Trade => match self.trade_block_reason() {
-                None => self.screen = Screen::Trade,
+                None => {
+                    self.screen = Screen::Trade;
+                    self.refresh_board();
+                }
                 Some(why) => self.flash(why),
             },
             Screen::Planet => {
@@ -1017,7 +1064,8 @@ impl App {
                 Key::Tab => Some(Action::SetTradeTab(match self.trade_tab {
                     TradeTab::Resources => TradeTab::Cargo,
                     TradeTab::Cargo => TradeTab::Port,
-                    TradeTab::Port => TradeTab::Resources,
+                    TradeTab::Port => TradeTab::Jobs,
+                    TradeTab::Jobs => TradeTab::Resources,
                 })),
                 Key::Char('y') => Some(Action::RepairHull),
                 _ => self.global_key(k),

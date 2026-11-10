@@ -763,6 +763,8 @@ pub fn crew(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     });
     ui.add_space(6.0);
     ui.label(dim("Health drops when O2, water or food run out, during brownouts, or under radiation. Medical supplies speed recovery. Morale affects fab and mining efficiency."));
+    ui.add_space(8.0);
+    quests(ui, app, acts);
 }
 
 // ------------------------------------------------------------ systems
@@ -907,7 +909,7 @@ pub fn trade(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     ui.label(dim(format!("Seat: {}{}", crate::sim::state::loc_label(cv.seat, sys), if cv.small { " (small outpost market)" } else { "" })));
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        for (t, label) in [(TradeTab::Resources, "Resources"), (TradeTab::Cargo, "Cargo"), (TradeTab::Port, "Port")] {
+        for (t, label) in [(TradeTab::Resources, "Resources"), (TradeTab::Cargo, "Cargo"), (TradeTab::Port, "Port"), (TradeTab::Jobs, "Jobs")] {
             if ui.add(egui::Button::selectable(app.trade_tab == t, RichText::new(label).strong())).clicked() {
                 acts.push(Action::SetTradeTab(t));
             }
@@ -921,6 +923,7 @@ pub fn trade(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         TradeTab::Resources => trade_resources(ui, app, acts),
         TradeTab::Cargo => trade_cargo(ui, app, acts),
         TradeTab::Port => trade_port(ui, app, acts),
+        TradeTab::Jobs => trade_jobs(ui, app, acts),
     }
 }
 
@@ -1052,6 +1055,97 @@ fn trade_cargo(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             ui.end_row();
         }
     });
+}
+
+fn trade_jobs(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    let sim = app.sim();
+    if sim.port_tier(&app.gal).is_none() {
+        ui.label(dim("Pre-space peoples post no jobs."));
+    } else {
+        section(ui, "JOBS ON OFFER");
+        if app.board.is_empty() {
+            ui.label(dim("Nothing this month. Boards change every 30 days."));
+        }
+        for q in &app.board {
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(q.title()).strong());
+                ui.label(dim(q.detail()));
+                let full = sim.quests.len() >= crate::sim::quest::MAX_QUESTS;
+                if ui.add_enabled(!full, egui::Button::new("Take the job")).on_disabled_hover_text("You already carry three jobs.").clicked() {
+                    acts.push(Action::AcceptQuest(q.id));
+                }
+            });
+        }
+    }
+    ui.add_space(6.0);
+    quests(ui, app, acts);
+}
+
+/// Your jobs, relics and artifacts (Trade › Jobs and the Crew screen).
+pub fn quests(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    use crate::sim::quest::{Job, QuestState};
+    let sim = app.sim();
+    section(ui, "YOUR JOBS");
+    if sim.quests.is_empty() {
+        ui.label(dim("None. Planetary and interstellar ports post jobs (Trade › Jobs)."));
+    }
+    for q in &sim.quests {
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(q.title()).strong().color(ACCENT));
+            ui.label(dim(q.detail()));
+            ui.horizontal_wrapped(|ui| {
+                match (&q.job, q.state) {
+                    (Job::Recover { sys, loc, .. }, QuestState::Active) => {
+                        let here = sim.sys_id == *sys && sim.loc == *loc && sim.trip.is_none() && sim.shuttle.is_none();
+                        if ui.add_enabled(here, egui::Button::new(format!("Search here ({:.0} h)", crate::sim::quest::SEARCH_H))).on_disabled_hover_text("Dock at the site first.").clicked() {
+                            acts.push(Action::SearchArtifact);
+                        }
+                    }
+                    (Job::Recover { .. }, QuestState::Recovered) => {
+                        if ui.add_enabled(sim.sys_id == q.giver_sys, egui::Button::new("Deliver it")).on_disabled_hover_text(format!("At {}.", q.giver_sys_name)).clicked() {
+                            acts.push(Action::CompleteQuest(q.id, false));
+                        }
+                        if ui.button("Keep it for its power").clicked() {
+                            acts.push(Action::CompleteQuest(q.id, true));
+                        }
+                    }
+                    (Job::Relic { .. }, _) => {
+                        if ui.add_enabled(sim.sys_id == q.giver_sys && !sim.relics.is_empty(), egui::Button::new("Hand over your best relic")).clicked() {
+                            acts.push(Action::CompleteQuest(q.id, false));
+                        }
+                    }
+                    (Job::Deliver { sys, .. }, _) => {
+                        if ui.add_enabled(sim.sys_id == *sys, egui::Button::new("Deliver")).clicked() {
+                            acts.push(Action::CompleteQuest(q.id, false));
+                        }
+                    }
+                }
+                if ui.small_button("Drop").clicked() {
+                    acts.push(Action::DropQuest(q.id));
+                }
+            });
+        });
+    }
+    if !sim.relics.is_empty() {
+        section(ui, "RELICS");
+        let t3 = app.gal.system_ref(sim.sys_id).civ.as_ref().map(|c| c.tier) == Some(CivTier::T3);
+        for (i, r) in sim.relics.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{} (from {}) — about {:.0} cr", r.name, r.from, r.value));
+                if ui.add_enabled(t3, egui::Button::new("Sell").small()).on_disabled_hover_text("Collectors are at interstellar stations.").clicked() {
+                    acts.push(Action::SellRelic(i));
+                }
+            });
+        }
+    }
+    if !sim.artifacts.is_empty() {
+        section(ui, "ARTIFACTS KEPT");
+        for a in &sim.artifacts {
+            ui.label(format!("{} — {}", a.name, a.power.describe()));
+        }
+    }
 }
 
 fn trade_port(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {

@@ -343,6 +343,20 @@ fn planet_colony_notes(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     {
         ui.label(RichText::new(format!("Your colony {} is here.", c.name)).color(GOOD).strong());
     }
+    for q in &sim.quests {
+        if let crate::sim::quest::Job::Recover { sys, loc, artifact, .. } = &q.job
+            && *sys == sim.sys_id
+            && *loc == body
+            && q.state == crate::sim::quest::QuestState::Active
+        {
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("The {} is somewhere on this world.", artifact.name)).color(ACCENT).strong());
+            let here = body == sim.loc && sim.trip.is_none() && sim.shuttle.is_none();
+            if ui.add_enabled(here, egui::Button::new(format!("Search for it ({:.0} h)", crate::sim::quest::SEARCH_H))).on_disabled_hover_text("Dock here first.").clicked() {
+                acts.push(Action::SearchArtifact);
+            }
+        }
+    }
     if body == sim.loc {
         colony::founding(ui, app, acts);
     }
@@ -587,8 +601,11 @@ mod smoke_tests {
                         sys.market = None;
                         sys.refresh_cargo_market(42);
                         app.screen = Screen::Trade;
-                        for tab in [crate::game::TradeTab::Resources, crate::game::TradeTab::Cargo, crate::game::TradeTab::Port] {
-                            app.trade_tab = tab;
+                        for tab in [crate::game::TradeTab::Resources, crate::game::TradeTab::Cargo, crate::game::TradeTab::Port, crate::game::TradeTab::Jobs] {
+                            app.apply(Action::SetTradeTab(tab));
+                            if let Some(q) = app.board.first().map(|q| q.id) {
+                                app.apply(Action::AcceptQuest(q));
+                            }
                             frame(&ctx, &app, &mut view, w, h);
                         }
                     }
