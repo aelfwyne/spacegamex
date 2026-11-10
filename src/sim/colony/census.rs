@@ -541,9 +541,9 @@ impl Census {
         }
         let share = (n / total).clamp(0.0, 1.0);
         for c in self.cohorts.iter_mut() {
-            for s in 0..2 {
-                let k = c[s] * share;
-                c[s] -= k;
+            for v in c.iter_mut() {
+                let k = *v * share;
+                *v -= k;
                 self.this_year.deaths += k;
             }
         }
@@ -698,9 +698,9 @@ impl Census {
         let maternal = births * r.maternal;
         for (a, c) in self.cohorts.iter_mut().enumerate() {
             let q = (q_year(a as f64, r) * dt).clamp(0.0, 1.0);
-            for s in 0..2 {
-                let d = c[s] * q;
-                c[s] -= d;
+            for v in c.iter_mut() {
+                let d = *v * q;
+                *v -= d;
                 self.this_year.deaths += d;
                 self.this_year.death_age_sum += d * a as f64;
             }

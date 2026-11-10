@@ -207,12 +207,15 @@ pub fn game_over(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>
         let rect = ui.max_rect();
         let painter = ui.painter().clone();
         paint::starfield(&painter, rect, 0xdead, 1.2, view.anim_t as f32);
-        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(60, 0, 0, 70));
         let Some(sim) = app.sim.as_ref() else { return };
         let Some(over) = sim.over.as_ref() else { return };
+        if over.cause != "Victory" {
+            painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(60, 0, 0, 70));
+        }
         ui.vertical_centered(|ui| {
             ui.add_space((rect.height() * 0.12).min(90.0));
-            ui.label(RichText::new("SHIP LOST").size(52.0).strong().color(CRIT));
+            let won = over.cause == "Victory";
+            ui.label(RichText::new(if won { "COLONY TRIUMPHANT" } else { "SHIP LOST" }).size(52.0).strong().color(if won { GOOD } else { CRIT }));
             ui.add_space(6.0);
             ui.label(RichText::new(&over.cause).size(22.0).color(TEXT));
             ui.label(RichText::new(&over.detail).size(16.0).color(DIM));
@@ -224,6 +227,8 @@ pub fn game_over(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>
                     for (k, v) in [
                         ("Ship", sim.ship().name.to_string()),
                         ("Survived until", fmt_daytime(over.t)),
+                        ("Colony", sim.colony.as_ref().map(|c| format!("{} — {:.0} people", c.name, c.population())).unwrap_or_else(|| "none".into())),
+                        ("Battles won / lost", format!("{} / {}", sim.battles_won, sim.battles_lost)),
                         ("Jumps", format!("{}  ({:.1} ly)", st.jumps, st.dist_ly)),
                         ("Systems visited", st.systems.to_string()),
                         ("Mined / scooped", format!("{} / {} kg", fmt_kg(st.mined), fmt_kg(st.scooped))),

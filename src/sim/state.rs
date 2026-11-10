@@ -356,6 +356,9 @@ pub struct Sim {
     /// The ship was lost; play goes on at the colony.
     #[serde(default)]
     pub ship_dormant: bool,
+    /// The victory screen has been answered.
+    #[serde(default)]
+    pub victory_seen: bool,
 }
 
 fn poisson(rng: &mut StdRng, lambda: f64) -> u32 {
@@ -915,6 +918,7 @@ impl Sim {
             artifacts: vec![],
             colony: None,
             ship_dormant: false,
+            victory_seen: false,
         };
         // The captain's age and retirement: their own stream, so adding
         // them changed nothing else about a seed.

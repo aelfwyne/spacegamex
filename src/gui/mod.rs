@@ -4,6 +4,7 @@
 //! frame loop applies them afterwards. That keeps every rule in
 //! [`crate::game`], and lets tests render every screen headlessly.
 
+pub mod colony;
 pub mod encounter;
 pub mod mapview;
 pub mod paint;
@@ -249,6 +250,7 @@ pub fn draw(ui: &mut Ui, app: &App, view: &mut View) -> Vec<Action> {
     match app.screen {
         Screen::Title => title::title(ui, app, view, &mut acts),
         Screen::GameOver => title::game_over(ui, app, view, &mut acts),
+        Screen::Victory => colony::victory(ui, app, view, &mut acts),
         Screen::Help if app.sim.is_none() => {
             egui::CentralPanel::default().show(ui, |ui| panels::help(ui, app, &mut acts));
         }
@@ -273,6 +275,7 @@ fn in_game(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
         .min_size(60.0)
         .show(ui, |ui| status_log(ui, app));
     match app.screen {
+        Screen::Cockpit if sim.in_colony => colony::cockpit(ui, app, view, acts),
         Screen::Cockpit => {
             egui::Panel::right("controls")
                 .resizable(true)
@@ -293,7 +296,11 @@ fn in_game(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
         _ => {
             egui::CentralPanel::default().show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.screen {
-                    Screen::Planet => panels::planet(ui, app, view, acts),
+                    Screen::Planet => {
+                        panels::planet(ui, app, view, acts);
+                        planet_colony_notes(ui, app, acts);
+                    }
+                    Screen::Colony => colony::page(ui, app, acts),
                     Screen::Star => panels::star(ui, app, view, acts),
                     Screen::Resources => panels::resources(ui, app, acts),
                     Screen::Crew => panels::crew(ui, app, acts),
@@ -304,6 +311,40 @@ fn in_game(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                 });
             });
         }
+    }
+}
+
+/// Under the planet page: how livable the selected world is, and founding
+/// (when docked there).
+fn planet_colony_notes(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    use crate::sim::colony::world;
+    let sim = app.sim();
+    let sys = app.gal.system_ref(sim.sys_id);
+    let body = app.selected_body();
+    let Some(p) = sys.site(body) else { return };
+    if world::colonizable(p).is_ok() {
+        ui.add_space(6.0);
+        let hab = world::habitability(p);
+        let col = match hab {
+            crate::sim::colony::Hab::Habitable => GOOD,
+            crate::sim::colony::Hab::Marginal => ACCENT,
+            crate::sim::colony::Hab::Hostile => WARN,
+            crate::sim::colony::Hab::Lethal => BAD,
+        };
+        ui.horizontal(|ui| {
+            ui.label(dim("For colonists:"));
+            ui.label(RichText::new(hab.name()).color(col).strong());
+            ui.label(dim(hab.describe()));
+        });
+    }
+    if let Some(c) = &sim.colony
+        && c.sys_id == sim.sys_id
+        && c.loc == body
+    {
+        ui.label(RichText::new(format!("Your colony {} is here.", c.name)).color(GOOD).strong());
+    }
+    if body == sim.loc {
+        colony::founding(ui, app, acts);
     }
 }
 
@@ -333,7 +374,7 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
             {
                 acts.push(Action::SkipToArrival);
             }
-            for &ff in TIME_SCALES.iter().rev() {
+            for &ff in TIME_SCALES.iter().rev().filter(|&&f| !(sim.in_colony && f > 60)) {
                 let label = if ff == 0 { "Pause".to_string() } else { format!("{ff}x") };
                 let txt = if ff == 0 && sim.ff == 0 {
                     RichText::new("PAUSED").color(BAD).strong()
@@ -350,6 +391,17 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
 
     ui.horizontal_wrapped(|ui| {
         let sys = app.gal.system_ref(sim.sys_id);
+        if sim.in_colony
+            && let Some(c) = &sim.colony
+        {
+            ui.label(RichText::new("COLONY").strong().color(GOOD));
+            ui.label(RichText::new(&c.name).strong());
+            ui.label(dim(format!("on {}", c.world)));
+            ui.label(format!("pop {}", colony::fmt_pop(c.population())));
+            ui.label(dim(format!("· captain {} ({:.0})", sim.player_name(), sim.player_age().floor())));
+            ui.label(dim("· a year passes in ~24 s at 1x"));
+            return;
+        }
         if let Some(trip) = &sim.trip {
             let done = trip.dist_ly * (1.0 - trip.remaining_h / trip.total_h.max(1e-9));
             ui.label(RichText::new("FTL TRANSIT").strong().color(CIV));
@@ -385,8 +437,9 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
     });
 
     ui.horizontal(|ui| {
-        let tabs: [(Screen, &str, &str); 8] = [
-            (Screen::Cockpit, "Cockpit", "Esc"),
+        let cockpit = if sim.in_colony { "Colony" } else { "Cockpit" };
+        let mut tabs: Vec<(Screen, &str, &str)> = vec![
+            (Screen::Cockpit, cockpit, "Esc"),
             (Screen::Map, "Star map", "M"),
             (Screen::Planet, "Planets", "P"),
             (Screen::Star, "Star", "I"),
@@ -395,6 +448,9 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
             (Screen::Crew, "Crew", "C"),
             (Screen::Trade, "Trade", "K"),
         ];
+        if sim.colony.is_some() && !sim.in_colony {
+            tabs.push((Screen::Colony, "Colony", "O"));
+        }
         for (s, label, key) in tabs {
             let blocked = s == Screen::Trade && app.trade_block_reason().is_some();
             let text = RichText::new(format!("{label} [{key}]")).strong();
@@ -587,6 +643,65 @@ mod smoke_tests {
                 app.screen = Screen::GameOver;
                 frame(&ctx, &app, &mut view, w, h);
             }
+        }
+    }
+
+    /// Found a colony with each ship and draw every colony screen and tab,
+    /// in colony mode and away with the ship, then the victory screens.
+    #[test]
+    fn colony_screens_render() {
+        use crate::game::ColonyTab;
+        use crate::sim::colony::world;
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        for ship in [2usize, 1] {
+            let mut view = View::default();
+            let mut app = App::with_game(42, ship);
+            let home = app.gal.home_id();
+            let idx = app.gal.system(home).planets.iter().position(|p| world::colonizable(p).is_ok()).unwrap();
+            app.sim.as_mut().unwrap().loc = crate::sim::Loc::Planet(idx);
+            app.sel_planet = idx;
+            app.screen = Screen::Planet;
+            frame(&ctx, &app, &mut view, 1280.0, 800.0);
+            app.apply(Action::FoundColony);
+            app.apply(Action::FoundColony);
+            assert!(app.sim().in_colony, "founded");
+            app.sim.as_mut().unwrap().ff = 60;
+            for _ in 0..200 {
+                app.tick(0.1);
+            }
+            app.apply(Action::RandomParent);
+            for &(w, h) in &[(800.0f32, 500.0f32), (1280.0, 800.0), (320.0, 240.0)] {
+                for tab in [ColonyTab::Overview, ColonyTab::Supplies, ColonyTab::Build, ColonyTab::Census, ColonyTab::Family, ColonyTab::Market] {
+                    app.apply(Action::SetColonyTab(tab));
+                    app.screen = Screen::Cockpit;
+                    frame(&ctx, &app, &mut view, w, h);
+                }
+            }
+            app.apply(Action::OldestColonist);
+            app.apply(Action::LeaveColony);
+            assert!(!app.sim().in_colony);
+            app.screen = Screen::Colony;
+            frame(&ctx, &app, &mut view, 1280.0, 800.0);
+            app.screen = Screen::Cockpit;
+            frame(&ctx, &app, &mut view, 1280.0, 800.0);
+            app.apply(Action::EnterColony);
+            assert!(app.sim().in_colony);
+            {
+                let c = app.sim.as_mut().unwrap().colony.as_mut().unwrap();
+                c.dock = true;
+                c.refresh_market();
+                c.won = true;
+            }
+            app.apply(Action::SetColonyTab(ColonyTab::Market));
+            app.screen = Screen::Cockpit;
+            frame(&ctx, &app, &mut view, 1280.0, 800.0);
+            app.tick(0.1);
+            assert_eq!(app.screen, Screen::Victory);
+            frame(&ctx, &app, &mut view, 1280.0, 800.0);
+            app.apply(Action::EndInVictory);
+            assert_eq!(app.screen, Screen::GameOver);
+            frame(&ctx, &app, &mut view, 1280.0, 800.0);
         }
     }
 

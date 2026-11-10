@@ -23,14 +23,17 @@ pub enum Screen {
     Crew,
     Systems,
     Trade,
+    Colony,
     Help,
     GameOver,
+    /// The colony reached a million.
+    Victory,
 }
 
 impl Screen {
     /// Screens that show the running game (and so need a sim).
     pub fn in_game(self) -> bool {
-        !matches!(self, Screen::Title | Screen::GameOver | Screen::Help)
+        !matches!(self, Screen::Title | Screen::GameOver | Screen::Help | Screen::Victory)
     }
 }
 
@@ -40,6 +43,17 @@ pub enum TradeTab {
     Resources,
     Cargo,
     Port,
+}
+
+/// Tabs of the colony panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColonyTab {
+    Overview,
+    Supplies,
+    Build,
+    Census,
+    Family,
+    Market,
 }
 
 /// Time-compression steps, in the order `F` cycles through them (0 = pause).
@@ -136,6 +150,26 @@ pub enum Action {
     HirePilot,
     /// Buy an Attack (true) or Defense (false) level at a T3 shipyard.
     BuyUpgrade(bool),
+    // ---- colony ----
+    FoundColony,
+    LeaveColony,
+    EnterColony,
+    AbandonColony,
+    UnloadCargo,
+    Build(crate::sim::colony::Project),
+    CancelBuild(usize),
+    ToggleAutoBuild,
+    DockBuy(Good),
+    DockSellMaterials(f64),
+    SetColonyTab(ColonyTab),
+    /// Show a colonist in the family view (materialises their family).
+    ViewPerson(u32),
+    RandomParent,
+    OldestColonist,
+    /// Victory: end the game in triumph.
+    EndInVictory,
+    /// Victory: give the colony up and keep flying.
+    VictoryAbandon,
     // ---- pirates ----
     Encounter(crate::sim::combat::Choice),
     // ---- misc ----
@@ -172,6 +206,13 @@ pub struct App {
     pub cargo_qty: u32,
     /// The captain's sex for the next new game (title screen).
     pub title_sex: Sex,
+    pub colony_tab: ColonyTab,
+    /// The colonist shown in the family view.
+    pub person: Option<u32>,
+    /// Real-clock time of the last colony-mode autosave.
+    last_colony_save: f64,
+    /// Founding asks twice.
+    pub confirm_found: bool,
     /// (msg, expiry on the real clock)
     pub flash: Option<(String, f64)>,
     /// Every status message shown — UI flashes and game events, newest last.
@@ -203,6 +244,10 @@ impl App {
             trade_tab: TradeTab::Resources,
             cargo_qty: 1,
             title_sex: Sex::Male,
+            colony_tab: ColonyTab::Overview,
+            person: None,
+            last_colony_save: 0.0,
+            confirm_found: false,
             flash: None,
             flash_history: Vec::new(),
             log_seen: 0,
@@ -657,6 +702,115 @@ impl App {
                 sim.buy_upgrade(&self.gal, attack);
             }
             Action::Encounter(c) => self.with_sim(|s| s.resolve_encounter(c)),
+            Action::FoundColony => {
+                if !self.confirm_found {
+                    self.confirm_found = true;
+                    self.flash("Founding is for life: press Found colony again to confirm.");
+                } else {
+                    self.confirm_found = false;
+                    let sim = self.sim.as_mut().unwrap();
+                    match sim.found_colony(&mut self.gal) {
+                        Ok(()) => {
+                            self.screen = Screen::Cockpit;
+                            self.colony_tab = ColonyTab::Overview;
+                            self.person = None;
+                        }
+                        Err(e) => self.flash(e),
+                    }
+                }
+            }
+            Action::LeaveColony => {
+                if let Err(e) = self.sim.as_mut().unwrap().leave_colony() {
+                    self.flash(e);
+                }
+            }
+            Action::EnterColony => {
+                if let Err(e) = self.sim.as_mut().unwrap().enter_colony() {
+                    self.flash(e);
+                } else {
+                    self.screen = Screen::Cockpit;
+                    let sim = self.sim.as_mut().unwrap();
+                    if sim.ff > 60 {
+                        sim.ff = 1;
+                    }
+                }
+            }
+            Action::AbandonColony => {
+                let sim = self.sim.as_mut().unwrap();
+                if let Err(e) = sim.abandon_colony(&mut self.gal) {
+                    self.flash(e);
+                } else {
+                    self.screen = Screen::Cockpit;
+                }
+            }
+            Action::UnloadCargo => {
+                let m = self.sim.as_mut().unwrap().unload_to_colony();
+                self.flash(m);
+            }
+            Action::Build(p) => {
+                if let Err(e) = self.sim.as_mut().unwrap().build(p) {
+                    self.flash(e);
+                }
+            }
+            Action::CancelBuild(i) => self.with_sim(|s| s.cancel_build(i)),
+            Action::ToggleAutoBuild => self.with_sim(|s| {
+                if let Some(c) = s.colony.as_mut() {
+                    c.auto_build = !c.auto_build;
+                }
+            }),
+            Action::DockBuy(g) => {
+                let n = self.cargo_qty;
+                self.with_sim(|s| s.dock_buy(g, n));
+            }
+            Action::DockSellMaterials(t) => self.with_sim(|s| s.dock_sell_materials(t)),
+            Action::SetColonyTab(t) => {
+                self.colony_tab = t;
+                if t == ColonyTab::Family && self.person.is_none() {
+                    let me = self.sim().colony.as_ref().map(|c| c.player);
+                    if let Some(id) = me {
+                        self.apply(Action::ViewPerson(id));
+                    }
+                }
+            }
+            Action::ViewPerson(id) => {
+                let sim = self.sim.as_mut().unwrap();
+                let now = crate::sim::people::years(sim.t);
+                if let Some(c) = sim.colony.as_mut()
+                    && c.census.ensure_family(id, now)
+                {
+                    self.person = Some(id);
+                    self.colony_tab = ColonyTab::Family;
+                }
+            }
+            Action::RandomParent | Action::OldestColonist => {
+                let sim = self.sim.as_mut().unwrap();
+                let now = crate::sim::people::years(sim.t);
+                let found = sim.colony.as_mut().and_then(|c| if a == Action::RandomParent { c.census.random_parent(now) } else { c.census.oldest(now) });
+                match found {
+                    Some(id) => self.apply(Action::ViewPerson(id)),
+                    None => self.flash("Nobody fits."),
+                }
+            }
+            Action::EndInVictory => {
+                let sim = self.sim.as_mut().unwrap();
+                sim.victory_seen = true;
+                let name = sim.colony.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+                sim.over = Some(crate::sim::state::GameOver {
+                    cause: "Victory".into(),
+                    detail: format!("{name} reached a million people. Your line will be remembered."),
+                    t: sim.t,
+                });
+                save::delete();
+                self.screen = Screen::GameOver;
+            }
+            Action::VictoryAbandon => {
+                let sim = self.sim.as_mut().unwrap();
+                sim.victory_seen = true;
+                if let Err(e) = sim.abandon_colony(&mut self.gal) {
+                    self.flash(e);
+                }
+                self.screen = Screen::Cockpit;
+            }
             Action::RepairHull => {
                 let sim = self.sim.as_mut().unwrap();
                 sim.repair_hull_t3(&mut self.gal);
@@ -727,7 +881,14 @@ impl App {
                 self.screen = Screen::Help;
             }
             Screen::Title => self.screen = Screen::Title,
-            Screen::GameOver => {}
+            Screen::GameOver | Screen::Victory => {}
+            Screen::Colony => {
+                if self.sim().colony.is_some() {
+                    self.screen = Screen::Colony;
+                } else {
+                    self.flash("You have no colony yet. Dock at a rocky world and found one from the Planets screen.");
+                }
+            }
             Screen::Map => {
                 self.refresh_map();
                 self.screen = Screen::Map;
@@ -753,7 +914,7 @@ impl App {
                 let r = self.help_return;
                 if r.in_game() && self.sim.is_none() { Screen::Title } else { r }
             }
-            Screen::Title | Screen::GameOver => self.screen,
+            Screen::Title | Screen::GameOver | Screen::Victory => self.screen,
             _ => {
                 if self.sim.is_some() { Screen::Cockpit } else { Screen::Title }
             }
@@ -805,6 +966,11 @@ impl App {
             Screen::GameOver => match k {
                 Key::Enter | Key::Esc | Key::Char('q') => Some(Action::AckGameOver),
                 _ => None,
+            },
+            Screen::Victory => None,
+            Screen::Colony => match k {
+                Key::Esc | Key::Char('o') => Some(Action::Back),
+                _ => self.global_key(k),
             },
             Screen::Help => match k {
                 Key::Esc | Key::Char('h') => Some(Action::Back),
@@ -906,6 +1072,7 @@ impl App {
             Key::Char('c') => Action::Open(Screen::Crew),
             Key::Char('r') => Action::Open(Screen::Resources),
             Key::Char('k') => Action::Open(Screen::Trade),
+            Key::Char('o') => Action::Open(Screen::Colony),
             Key::Char('f') => Action::CycleTimeScale,
             Key::Char('x') => Action::SkipToArrival,
             Key::Char('v') => Action::ToggleSalvage,
@@ -931,6 +1098,28 @@ impl App {
         let Some(sim) = self.sim.as_mut() else { return };
         if sim.over.is_some() {
             return;
+        }
+        if sim.in_colony {
+            // Colony time: about 24 real seconds a year at 1x.
+            if sim.ff > 60 {
+                sim.ff = 60;
+            }
+            if sim.ff > 0 {
+                let dt_h = dt * Sim::colony_hours_per_sec(sim.ff);
+                sim.advance(dt_h, &mut self.gal);
+            }
+            if self.real_clock - self.last_colony_save >= 30.0 {
+                self.last_colony_save = self.real_clock;
+                let _ = save::save(sim, &self.gal);
+            }
+            if sim.colony.as_ref().is_some_and(|c| c.won) && !sim.victory_seen {
+                self.screen = Screen::Victory;
+            }
+            self.drain_log();
+            return;
+        }
+        if sim.colony.as_ref().is_some_and(|c| c.won) && !sim.victory_seen {
+            self.screen = Screen::Victory;
         }
         if sim.ff > 0 {
             let dt_h = dt * sim.ff as f64 / 3600.0;
