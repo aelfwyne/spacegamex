@@ -82,7 +82,7 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
 
         ui.vertical_centered(|ui| {
             ui.add_space((rect.height() * 0.06).min(50.0));
-            ui.label(RichText::new("FTL  DRIFT").size(56.0).strong().color(ACCENT));
+            ui.label(RichText::new("COLONIA  GALACTICA").size(56.0).strong().color(ACCENT));
             ui.label(RichText::new("One ship. One infinite galaxy. No respawn.").size(17.0).color(DIM));
             ui.add_space(18.0);
         });

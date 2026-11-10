@@ -1,9 +1,9 @@
-//! FTL Drift — spaceship survival sim.
+//! Colonia Galactica — spaceship survival sim.
 //!
 //! * [`sim`]   — the deterministic simulation (no UI, no I/O but save files)
 //! * [`game`]  — toolkit-agnostic game shell: screens, actions, keys, tick
 //! * [`gui`]   — the eframe/egui front end
-//! * [`headless`] — autopilot balance runner for `spacegame-sim`
+//! * [`headless`] — autopilot balance runner for `colonia-galactica-sim`
 
 pub mod game;
 pub mod gui;

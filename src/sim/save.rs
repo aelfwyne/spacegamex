@@ -25,21 +25,38 @@ pub struct SaveFile {
 
 /// Per-user data directory for the game.
 ///
-/// Linux: `$XDG_DATA_HOME/spacegame` (default `~/.local/share/spacegame`).
-/// Windows: `%APPDATA%\spacegame\data`. macOS: `~/Library/Application
-/// Support/spacegame`. Tests use a private temp dir so they never touch a
-/// player's real save.
+/// Linux: `$XDG_DATA_HOME/colonia-galactica` (default
+/// `~/.local/share/colonia-galactica`). Windows: `%APPDATA%\colonia-galactica\data`.
+/// macOS: `~/Library/Application Support/colonia-galactica`. Tests use a
+/// private temp dir so they never touch a player's real save.
 pub fn data_dir() -> std::path::PathBuf {
     if cfg!(test) {
-        return std::env::temp_dir().join(format!("spacegame-test-{}", std::process::id()));
+        return std::env::temp_dir().join(format!("colonia-galactica-test-{}", std::process::id()));
     }
-    directories::ProjectDirs::from("", "", "spacegame")
+    directories::ProjectDirs::from("", "", "colonia-galactica")
         .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir().join("spacegame"))
+        .unwrap_or_else(|| std::env::temp_dir().join("colonia-galactica"))
+}
+
+/// Where the game kept its save when it was called FTL Drift (`spacegame`).
+fn legacy_save_path() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("", "", "spacegame").map(|d| d.data_dir().join("save.json"))
 }
 
 pub fn save_path() -> std::path::PathBuf {
-    data_dir().join("save.json")
+    let path = data_dir().join("save.json");
+    // First run after the rename: carry the old save over (copied, never
+    // moved, so the old file stays as a backup).
+    if !cfg!(test)
+        && !path.exists()
+        && let Some(old) = legacy_save_path().filter(|p| p.is_file())
+    {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(old, &path);
+    }
+    path
 }
 
 pub fn save(sim: &Sim, galaxy: &Galaxy) -> std::io::Result<std::path::PathBuf> {

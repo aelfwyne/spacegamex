@@ -1,23 +1,23 @@
 [package]
-name = "spacegame"
+name = "colonia-galactica"
 version = "0.4.0"
 edition = "2024"
-description = "FTL Drift — a spaceship survival sim"
-default-run = "spacegame"
+description = "Colonia Galactica — spaceship survival and colony building"
+default-run = "colonia-galactica"
 
 [lib]
-name = "spacegame"
+name = "colonia_galactica"
 path = "src/lib.rs"
 
 # Windowed game (eframe/egui: Wayland + X11 on Linux, Win32 on Windows).
 [[bin]]
-name = "spacegame"
-path = "src/bin/spacegame.rs"
+name = "colonia-galactica"
+path = "src/bin/colonia-galactica.rs"
 
 # Headless balance simulator (console tool, used by the regression sweep).
 [[bin]]
-name = "spacegame-sim"
-path = "src/bin/spacegame-sim.rs"
+name = "colonia-galactica-sim"
+path = "src/bin/colonia-galactica-sim.rs"
 
 [dependencies]
 directories = "6.0.0"

@@ -1,20 +1,20 @@
-//! FTL Drift — windowed game.
+//! Colonia Galactica — windowed game.
 //!
 //! Release builds on Windows are GUI-subsystem apps (no console window);
-//! the headless simulator is a separate console binary, `spacegame-sim`.
+//! the headless simulator is a separate console binary, `colonia-galactica-sim`.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui;
-use spacegame::gui::GuiApp;
+use colonia_galactica::gui::GuiApp;
 
 /// Must match the `.desktop` file name (and StartupWMClass) so KDE/Wayland
 /// shows the right icon and groups the window in the task manager.
-const APP_ID: &str = "spacegame";
+const APP_ID: &str = "colonia-galactica";
 
 fn main() -> eframe::Result {
-    let seed = spacegame::headless::args_seed();
+    let seed = colonia_galactica::headless::args_seed();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("FTL Drift")
+        .with_title("Colonia Galactica")
         .with_app_id(APP_ID)
         .with_inner_size([1360.0, 860.0])
         .with_min_inner_size([960.0, 600.0]);

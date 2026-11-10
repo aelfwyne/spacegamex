@@ -1,4 +1,4 @@
-//! Headless balance simulation (the `spacegame-sim` binary and the
+//! Headless balance simulation (the `colonia-galactica-sim` binary and the
 //! regression sweep). Runs the autopilot with no front end at all.
 
 use crate::sim::{Galaxy, Level, Sim};
@@ -59,7 +59,7 @@ pub fn headless_sim(ship_idx: usize, seed: u64, hours: u64) -> i32 {
     let steps = (hours as f64 / dt) as u64;
     let mut next_report = 24.0f64;
     let start_day = 0.0f64;
-    println!("=== FTL DRIFT headless balance run ===");
+    println!("=== COLONIA GALACTICA headless balance run ===");
     println!("ship: {}  seed: 0x{seed:012X}  hours: {hours}", crate::sim::SHIPS[ship_idx].name);
     println!("t(day h)  sys      loc         H2%   WAT%  OXY%  FOO%  HULL%  HP  MOR  state");
     let mut last_cause = String::new();

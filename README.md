@@ -1,4 +1,4 @@
-# FTL Drift
+# Colonia Galactica
 
 A windowed spaceship survival sim. Rust + [egui/eframe](https://github.com/emilk/egui).
 One ship, one universe, no respawn: the galaxy is infinite, procedurally
@@ -9,6 +9,10 @@ view of the current system (shaded planets, the star, your ship moving
 between them), a pannable/zoomable star map, and an FTL warp view during
 jumps. Everything can be done with the mouse; every action also has a
 keyboard shortcut.
+
+*Formerly **FTL Drift**. Installing this version removes the old
+`spacegame` binaries and launcher, and the first launch copies an existing
+save from `~/.local/share/spacegame/` (the old file is left as a backup).*
 
 ## Install (Linux / KDE Plasma)
 
@@ -25,12 +29,12 @@ This installs:
 
 | What | Where |
 |------|-------|
-| `spacegame` (the game) and `spacegame-sim` (headless simulator) | `~/.local/bin/` |
-| Application-menu launcher "FTL Drift" | `~/.local/share/applications/spacegame.desktop` |
-| Icon | `~/.local/share/icons/hicolor/256x256/apps/spacegame.png` |
+| `colonia-galactica` (the game) and `colonia-galactica-sim` (headless simulator) | `~/.local/bin/` |
+| Application-menu launcher "Colonia Galactica" | `~/.local/share/applications/colonia-galactica.desktop` |
+| Icon | `~/.local/share/icons/hicolor/256x256/apps/colonia-galactica.png` |
 
-After installing, launch **FTL Drift** from the KDE application menu (under
-Games), or run `spacegame` from a terminal. No install needed to just try it:
+After installing, launch **Colonia Galactica** from the KDE application menu (under
+Games), or run `colonia-galactica` from a terminal. No install needed to just try it:
 `cargo run` works straight from the source tree.
 
 ## Run
@@ -38,13 +42,13 @@ Games), or run `spacegame` from a terminal. No install needed to just try it:
 ```
 cargo run                                   # the game (debug build)
 cargo run --release -- --seed 42            # a specific galaxy
-spacegame --seed 0x2a                       # installed; decimal or hex seeds
+colonia-galactica --seed 0x2a                       # installed; decimal or hex seeds
 ```
 
 Headless balance simulator (used by the regression battery):
 
 ```
-cargo run --release --bin spacegame-sim -- --sim 500 --ship 0|1|2 --seed N
+cargo run --release --bin colonia-galactica-sim -- --sim 500 --ship 0|1|2 --seed N
                                             # 500 in-game hours, exit 1 = died
 cargo test                                  # unit tests, balance battery, GUI smoke test
 cargo test all_ships_survive_500h_seed42    # 3 ships x seed 42, 500 h, 0 losses, >=1 jump
@@ -172,7 +176,7 @@ There is also a hidden autopilot: the decision logic that makes a ship
 survive indefinitely, picking destinations, shuttling to ore worlds,
 splitting the drones between feedstock and buffers, and refusing crossings
 it cannot outlast. It does not fly your ship in interactive play; it exists
-to make the balance honest, driving the headless simulator (`spacegame-sim`) and
+to make the balance honest, driving the headless simulator (`colonia-galactica-sim`) and
 the regression tests to prove the game is survivable.
 
 ## Controls
@@ -290,7 +294,7 @@ game a lesson):
   the bulk ores the fab barely touches.
 
 The regression battery (`cargo test all_ships_survive_500h_seed42`) plus a
-manual sweep with `spacegame-sim` (seeds 1, 2, 3, 5, 7, 8, 11, 55, 77, 100, 123, 4242, 999,
+manual sweep with `colonia-galactica-sim` (seeds 1, 2, 3, 5, 7, 8, 11, 55, 77, 100, 123, 4242, 999,
 1234, 2026, 31337, 4242, 99999 for the colony; 42/7/1234/999 for all
 ships) currently passes 100%: zero losses across all 26 runs.
 
@@ -298,9 +302,9 @@ ships) currently passes 100%: zero losses across all 26 runs.
 
 JSON in the per-user data directory:
 
-- Linux: `$XDG_DATA_HOME/spacegame/save.json` (defaults to
-  `~/.local/share/spacegame/save.json`)
-- Windows: `%APPDATA%\spacegame\data\save.json`
+- Linux: `$XDG_DATA_HOME/colonia-galactica/save.json` (defaults to
+  `~/.local/share/colonia-galactica/save.json`)
+- Windows: `%APPDATA%\colonia-galactica\data\save.json`
 
 Only systems you have visited are stored (everything else regenerates
 identically from the seed), so saves stay small.
@@ -322,10 +326,10 @@ build step, not a port:
 
 - `cargo build --release` on a Windows machine with the MSVC Rust toolchain
   (`rustup default stable-x86_64-pc-windows-msvc`) produces
-  `target\release\spacegame.exe` and `spacegame-sim.exe`. eframe uses
+  `target\release\colonia-galactica.exe` and `colonia-galactica-sim.exe`. eframe uses
   Direct3D 12 / Vulkan there via wgpu; no extra SDKs are needed.
 - The game binary is built as a GUI-subsystem app in release mode (no
-  console window); `spacegame-sim` stays a console tool.
+  console window); `colonia-galactica-sim` stays a console tool.
 - Saves go to `%APPDATA%` automatically (the `directories` crate).
 - Still to add when shipping on Windows: an `.exe` icon resource (e.g. via
   the `winres` crate in a `build.rs` gated on `cfg(windows)`), and an
@@ -336,8 +340,8 @@ build step, not a port:
 
 ```
 src/lib.rs            crate root
-src/bin/spacegame.rs      windowed game entry (eframe; app id "spacegame")
-src/bin/spacegame-sim.rs  headless balance simulator (CLI)
+src/bin/colonia-galactica.rs      windowed game entry (eframe; app id "colonia-galactica")
+src/bin/colonia-galactica-sim.rs  headless balance simulator (CLI)
 src/game.rs           toolkit-agnostic game shell: screens, Action enum,
                       key bindings, real-time tick, save/load wiring
 src/headless.rs       autopilot balance runner
@@ -372,7 +376,7 @@ src/gui/
   panels.rs           cockpit controls, planet/star/resources/crew/
                       systems/trade/help pages
   title.rs            title / ship select, game over
-assets/               icon.png, spacegame.desktop.in
+assets/               icon.png, colonia-galactica.desktop.in
 ```
 
 The GUI never mutates game state directly: draw functions read the state
