@@ -1219,11 +1219,35 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         "Repair the hull with structural MAT (metal + silicate). FTL wear grows with every jump.",
         "Power budget: too many systems on → brownout → life support suffers.",
         "Jump: open the star map, pick a system, and jump once the capacitors read 100%. Charge depends on distance.",
-        "Civilizations are about 1 in 50 systems and mostly untradeable. Be self-sufficient.",
+        "Civilizations are rare (the Civilization option changes how rare). Be self-sufficient.",
         "Run out of H2 mid-jump and the drive collapses. Run out of O2, water or food and people die.",
     ];
     section(ui, "HOW TO SURVIVE");
     for t in tips {
+        ui.label(format!("•  {t}"));
+    }
+    ui.add_space(8.0);
+    section(ui, "HOW TO WIN: THE COLONY");
+    for t in [
+        "Win by growing a colony to 1,000,000 people. You can only keep one colony at a time.",
+        "Colony supplies (hydroponics, recycling, drones, AI clusters, power, medical kits, domes) are cargo: buy them at markets (Trade › Cargo). The Ark starts with a full kit for 500.",
+        "Found a colony from the Planets screen while docked at a rocky world or moon. Check its habitability: a lethal world kills anyone without a dome.",
+        "The Keelclipper needs a partner first (Trade › Port › recruit). A native partner makes the colony Hybrid and needs a Genetic Modification Kit for children.",
+        "Few founders start below the galactic tech level and carry a genetic penalty: the long game. AI clusters keep (and slowly raise) the tech level.",
+        "Supplies wear out. Build a Programmable Manufacturing Plant to make them from raw materials, Bio-Domes on hostile worlds, then a Space Dock and a Business Center.",
+        "In colony mode a year passes in about 24 seconds at 1x. Fly off for supplies when needed: the colony carries on, slowly, without you.",
+        "Your captain retires at 60–80 and a successor (often your own child) takes over. The Family tab lets you click through generations.",
+    ] {
+        ui.label(format!("•  {t}"));
+    }
+    ui.add_space(8.0);
+    section(ui, "PIRATES, JOBS AND RELICS");
+    for t in [
+        "Pirates are rare (rarer on Tourist, common on Risky). Fight, flee or pay. Losing costs cargo: never more than half on Tourist, never the fuel or the ship on Normal.",
+        "Win and you may destroy their ship for a bounty, paid at the next port. Buy Attack and Defense at interstellar shipyards; hire a pilot at any port.",
+        "Ports post jobs (Trade › Jobs): recover artifacts, bring relics, deliver cargo. Keep an artifact and it gives a permanent bonus.",
+        "Salvaging ruins (V) sometimes turns up relics that collectors pay well for.",
+    ] {
         ui.label(format!("•  {t}"));
     }
     ui.add_space(8.0);
@@ -1242,8 +1266,10 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         ("← / →", "select previous / next planet"),
         ("M", "star map — ↑↓ or 1–9 select, Enter set/clear destination, T jump, C clear"),
         ("T / Enter", "jump (cockpit), once a destination is set and charged"),
-        ("K", "trade — ↑↓ select, B buy, S sell, +/- quantity ×10, Y shipyard repair"),
-        ("C / R", "crew · resources"),
+        ("K", "trade — Tab next tab, ↑↓ select, B buy, S sell, +/- quantity ×10, Y shipyard repair"),
+        ("C / R", "crew (and your jobs) · resources"),
+        ("O", "colony (when away from it)"),
+        ("1 / 2 / 3", "when pirates hail: fight · flee · pay (after a win: destroy · let go)"),
         ("F", "time compression 1x → 10x → 60x → 600x → pause"),
         ("X", "skip to arrival during FTL (works while paused)"),
         ("V", "drones salvage wreckage instead of mining (where there is any)"),
@@ -1259,7 +1285,7 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     });
     ui.add_space(8.0);
     section(ui, "TIME");
-    ui.label("1x is real time (1 game second per real second); fast-forward compresses it. Time keeps flowing on every screen.");
+    ui.label("1x is real time (1 game second per real second); fast-forward compresses it. Time keeps flowing on every screen. In colony mode a year takes about 24 seconds at 1x (up to 60x). The clock shows Year and Day (365-day years).");
     if let Some(sim) = app.sim.as_ref() {
         ui.add_space(6.0);
         ui.label(dim(format!("Galaxy seed: 0x{:012X} — share it to replay your universe.", sim.seed)));

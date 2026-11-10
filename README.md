@@ -63,13 +63,15 @@ caught before a player sees it.
 
 You start at the origin system in one of three ships:
 
-| # | Ship | Crew | What it is |
-|---|------|------|------------|
-| 1 | Keelclipper 'Meridian' | 1 | Light, efficient, forgiving — everything runs on one person's judgement. |
-| 2 | Cargomaster 'Providence' | 5 | Real industrial capacity: mining, fab and fuel on a proper scale. |
-| 3 | Ark 'Hesperide' | 10 + 500 pax | Enormous industrial plant — and an enormous mouth to feed. The hardest way to survive. |
+| # | Ship | Crew | Cargo hold | What it is |
+|---|------|------|------------|------------|
+| 1 | Keelclipper 'Meridian' | 1 | 8 t | Light, efficient, forgiving. Needs a recruited partner to found a colony, and cannot carry a full colony kit in one go. |
+| 2 | Cargomaster 'Providence' | 10 | 80 t | Real industrial capacity, and a hold big enough to found a small colony of ten. |
+| 3 | Ark 'Hesperide' | 10 + 500 pax | 600 t | Sails with a full colony kit for 500. Enormous plant, enormous mouth to feed. |
 
-The objective is simply **to survive**, indefinitely. The ship has:
+First, **survive**: keep the ship fuelled and the crew fed. Then, to
+**win**, found a colony and grow it to **1,000,000 people** (see *The
+colony* below). The ship has:
 
 - **Fuel (H2)** — scooped from stars and giant atmospheres. Never made on
   board. Scoop at the star, or shuttle to a gas/ice giant.
@@ -129,9 +131,58 @@ autopilot knows it.
 working colony run a T2 market (limited food, water, medicine and
 materials — a waypoint, not a life). Interstellar natives or an
 industrial colony run a T3 station that stocks two million tons of
-everything: the only true resupply. Pre-space natives can only be
-observed. About 2 systems in 100 hold any civilisation at all; under 1 in
+everything: the only true resupply. Pre-space natives only barter
+goods. About 2 systems in 100 hold any civilisation at all; under 1 in
 100 will trade.
+
+### The colony
+
+- **Supplies are cargo.** Hydroponics Kits (1 per 100 colonists, last 50
+  years), Recycling Centers (1/100, 100 y), Resource Drones (1/200, 25 y),
+  AI Clusters (1/1,000, 25 y), Power Generators (1/500, 50 y), Medical Kits
+  (1/10, 1 y) and Temporary Hazard Domes (1/25, 50 y, only off habitable
+  worlds). Buy them at markets (Trade › Cargo). Shortfalls scale the
+  penalties: no power cripples everything, no hydroponics means manual
+  labour, no AI clusters collapses the tech level.
+- **Founding:** dock at a rocky world or moon and use *Found colony* on the
+  Planets screen. Habitability decides the domes: on a lethal world anyone
+  without a dome dies. Ten founders (5 men, 5 women) or a captain and
+  partner start below the galactic tech level with a genetic penalty from
+  the second generation: the long game. A native partner makes the colony
+  Hybrid (needs a Genetic Modification Kit).
+- **Colony mode:** a turning view of the world with its city lights, and
+  tabs for every stat, supplies, building, the census (age pyramid, Random
+  parent, Oldest colonist) and a family tree you can click through. A year
+  passes in about 24 seconds at 1x, so a lifetime is about half an hour.
+  Leave to fly for supplies; the colony carries on at ship time.
+- **The census** tracks every colonist individually up to 10,000 living;
+  past that the bulk is counted by age, and anyone you look at is drawn
+  from it with their family, so the records look as if they always
+  existed. Names are derived, never stored, so saves stay small at a
+  million.
+- **Buildings:** Programmable Manufacturing Plant (makes supplies from raw
+  materials, 1 per 10,000), Bio-Dome (shelters 10,000), Space Dock (at
+  100,000: sell materials and buy supplies without leaving) and Business
+  Center (better prices, higher standard of living).
+- **Succession:** the captain retires at 60–80 and a successor (often your
+  own child) takes over seamlessly. Losing the ship with a colony standing
+  is not the end.
+- **Victory:** at a million, end the game in triumph, or abandon the colony
+  (it carries on as an independent colony) and fly on.
+
+### Cargo, pirates and quests
+
+- **Cargo markets** everywhere there is a civilisation, even pre-space
+  natives (who barter crafts, biologicals and captives). Prices vary per
+  system, so hauling goods pays.
+- **Pirates** are rare, random, and resolved in a few rounds: fight, flee
+  or pay. Losses are capped by the Risk option (Tourist ≤ 50%; Normal ≤ 75%
+  and never the fuel or the ship; only Risky can lose the ship, after the
+  fifth defeat). Win, and you may destroy them for a bounty paid at the
+  next port. Attack and Defense levels at T3 shipyards; pilots at any port.
+- **Quests:** ports post jobs (recover an artifact, bring a relic, deliver
+  cargo). Artifacts can be delivered for credits and an upgrade or kept for
+  a permanent power. Relics turn up while salvaging ruins.
 
 ### What worlds do to you
 
@@ -159,9 +210,10 @@ life support cannot outlast.
 
 ### Time
 
-1 real second = 1 game second by default. `F` (or the buttons in the top
-bar) cycles time compression 1x / 10x / 60x / 600x / pause; during a flight
-`X` skips to arrival. The sim step
+1 real second = 1 game second by default, and the clock reads Year and
+Day (365-day years). `F` (or the buttons in the top bar) cycles time
+compression 1x / 10x / 60x / 600x / pause; during a flight `X` skips to
+arrival. In colony mode a year passes in about 24 seconds at 1x (up to 60x). The sim step
 is continuous, so fast-forward is exact, not a shortcut.
 
 ### How the ship is flown
@@ -193,7 +245,8 @@ the regression tests to prove the game is survivable.
   lists every system within 30 ly with flight-time and fuel estimates, and
   the **JUMP** button.
 - **Top bar:** time compression, save, help, quit, and tabs for every screen
-  (Cockpit, Star map, Planets, Star, Ship systems, Resources, Crew, Trade).
+  (Cockpit, Star map, Planets, Star, Ship systems, Resources, Crew, Trade,
+  and Colony when you are away from it).
 - **Right column (cockpit):** reactor, scoop, drones, shields, lights,
   repair, fab focus, FTL throttle and the jump button. The log at the bottom
   can be resized by dragging its top edge.
@@ -201,7 +254,8 @@ the regression tests to prove the game is survivable.
 ### Keys
 
 **Title:** `1`/`2`/`3` or arrows pick a ship, `Enter` starts, `C` continues
-a saved game, `H` help, `Q` quit. (Typing in the seed box never fires
+a saved game, `H` help, `Q` quit. Below the buttons: galaxy options and the
+captain's sex. (Typing in the seed box never fires
 shortcuts.)
 
 **In game:**
@@ -221,7 +275,8 @@ shortcuts.)
 | `C` | Crew |
 | `R` | Resources |
 | `M` | Star map (jump destinations) |
-| `K` | Trade (at T2/T3 systems) |
+| `K` | Trade: Resources, Cargo, Port (recruit, hire, upgrades) and Jobs; `Tab` switches tabs |
+| `O` | Colony (when away from it) |
 | `T` / `Enter` (cockpit) | Jump, once a destination is set and charged |
 | `F` | Time compression 1x→10x→60x→600x→paused |
 | `X` | Skip to arrival (in flight; works while paused) |
@@ -316,8 +371,9 @@ save; if a save cannot be loaded, the title screen says why.
 
 Save format 3 (since v0.3.0) uses the detailed world generator, so every
 galaxy changed shape: saves from v0.2.0 and earlier cannot be continued (the
-title screen says so) and start a new game instead. v0.3.0 saves load in
-v0.4.0 with the default galaxy options.
+title screen says so) and start a new game instead. v0.3.0 and v0.4.0 saves
+load in v0.5.0 (with the default galaxy options, an empty hold and a male
+captain).
 
 ## Building on Windows (future)
 
@@ -365,6 +421,16 @@ src/sim/
   state.rs            the sim: advance(), autopilot, mining, fab, trade,
                       FTL, life support, balance tests
   save.rs             save/load (atomic writes, per-OS data directory)
+  opts.rs             galaxy options (resources, civilization, risk)
+  people.rs           the calendar (365-day years) and sex
+  cargo.rs            commodities, the cargo hold, cargo markets
+  commerce.rs         cargo trading, recruiting partners, hiring pilots
+  combat.rs           pirate encounters, upgrades, bounties
+  quest.rs            jobs, relics and artifacts
+  colony/             the player's colony:
+    mod.rs              founding, supplies, buildings, succession, victory
+    census.rs           individuals, cohorts, on-demand family records
+    world.rs            habitability and world dangers
 src/gui/
   mod.rs              eframe app, frame loop, shared top bar / log / toast
   theme.rs            colors, fonts, small widgets
@@ -376,6 +442,8 @@ src/gui/
   panels.rs           cockpit controls, planet/star/resources/crew/
                       systems/trade/help pages
   title.rs            title / ship select, game over
+  colony.rs           colony view (turning world, city lights) and tabs
+  encounter.rs        pirate dialog
 assets/               icon.png, colonia-galactica.desktop.in
 ```
 
@@ -385,11 +453,11 @@ toolkit means rewriting `src/gui/` only.
 
 ### Development
 
-Debug builds accept `SPACEGAME_PREVIEW=<screen>,<ship>,<hours>` to skip
+Debug builds accept `COLONIA_PREVIEW=<screen>,<ship>,<hours>` to skip
 straight to a screen with the autopilot having flown for a while, e.g.
-`SPACEGAME_PREVIEW=map,2,40 cargo run -- --seed 7`. Screens: `cockpit`,
+`COLONIA_PREVIEW=map,2,40 cargo run -- --seed 7`. Screens: `cockpit`,
 `trip`, `map`, `planet`, `star`, `systems`, `resources`, `crew`, `trade`,
 `help`, `title`. An optional fourth field jumps to the nearest system with a
 feature and selects it: `pbin`, `sbin`, `natives`, `colony`, `belt`,
 `rings`, `storm`, `life`, `locked`, `corrosive`, `ice` (e.g.
-`SPACEGAME_PREVIEW=planet,1,1,natives`). Release builds ignore it.
+`COLONIA_PREVIEW=planet,1,1,natives`). Release builds ignore it.

@@ -68,11 +68,11 @@ impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, seed: u64) -> Self {
         theme::apply(&cc.egui_ctx);
         let mut app = App::new(seed);
-        // Debug builds only: `SPACEGAME_PREVIEW=map,2,40` starts ship 2,
+        // Debug builds only: `COLONIA_PREVIEW=map,2,40` starts ship 2,
         // runs 40 h of autopilot, and opens the map — for screenshots and
         // layout work without clicking through. Never in release builds.
         if cfg!(debug_assertions)
-            && let Ok(spec) = std::env::var("SPACEGAME_PREVIEW")
+            && let Ok(spec) = std::env::var("COLONIA_PREVIEW")
         {
             preview(&mut app, &spec);
         }
