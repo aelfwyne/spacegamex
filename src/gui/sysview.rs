@@ -88,18 +88,19 @@ fn layout(sys: &StarSystem, rect: egui::Rect, view: &View, sim_t: f64) -> Layout
     let sep = s_type.map(|c| c.separation_au).unwrap_or(0.0) as f32;
     let dir_b = vec2(0.8, -0.6);
     let fit = |extent_au: f64, inner: f32| ((radius - inner - 16.0) / (extent_au.max(1e-6) as f32).sqrt()).max(0.01);
+    // Star A's place is worked out from the zoomed scale, so zooming scales
+    // everything about the view centre (plus pan) and the pointer pivot holds.
     let (k, center_a) = match (view.sys_focus, s_type) {
         (Focus::B, Some(c)) => {
-            let k = fit(max_b.max(c.star.habitable_au() * 1.5), star_b_r);
+            let k = fit(max_b.max(c.star.habitable_au() * 1.5), star_b_r) * view.sys_zoom;
             (k, rect.center() - dir_b * (k * sep.sqrt() + star_r + star_b_r))
         }
         (Focus::Both, Some(_)) => {
-            let k = (radius * 1.6) / (sep.sqrt() + (max_b as f32).sqrt() + (max_a as f32).sqrt() * 0.5).max(0.01);
+            let k = (radius * 1.6) / (sep.sqrt() + (max_b as f32).sqrt() + (max_a as f32).sqrt() * 0.5).max(0.01) * view.sys_zoom;
             (k, rect.center() - dir_b * k * sep.sqrt() * 0.5)
         }
-        _ => (fit(max_a, star_r), rect.center()),
+        _ => (fit(max_a, star_r) * view.sys_zoom, rect.center()),
     };
-    let k = k * view.sys_zoom;
     let a = center_a + view.sys_pan;
     let b = s_type.map(|_| a + dir_b * (k * sep.sqrt() + star_r + star_b_r));
     Layout { a, b, k, star_r, star_b_r, years: sim_t / 86_400.0 / 365.25, days: sim_t / 86_400.0 }
@@ -142,6 +143,7 @@ pub fn draw(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
         }
     }
     let lay = layout(sys, rect, view, sim.t);
+    view.sys_star = if view.sys_focus == Focus::B { lay.b.unwrap_or(lay.a) } else { lay.a };
     let show_moons_for = |i: usize| view.sys_zoom >= 2.2 || app.sel_planet == i || sim.loc.planet() == Some(i);
 
     // ---- orbits & belts ----
@@ -522,4 +524,80 @@ fn footer(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             ui.label(RichText::new("■ colony in system").color(COLONY_COL));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(ctx: &egui::Context, app: &App, view: &mut View, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+            events,
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(input, |ui| {
+            super::super::draw(ui, app, view);
+        });
+        full.textures_delta.clear();
+    }
+
+    /// Scrolling over the system view keeps the point under the pointer
+    /// fixed: the star moves straight away from (or toward) the pointer.
+    fn check(ctx: &egui::Context, app: &App, view: &mut View, focus: Focus) {
+        for _ in 0..3 {
+            frame(ctx, app, view, vec![]);
+        }
+        view.sys_focus = focus;
+        frame(ctx, app, view, vec![]);
+        let star0 = view.sys_star;
+        for p in [star0, star0 + vec2(-150.0, 90.0), star0 + vec2(120.0, -60.0)] {
+            view.sys_zoom = 1.0;
+            view.sys_pan = Vec2::ZERO;
+            frame(ctx, app, view, vec![egui::Event::PointerMoved(p)]);
+            frame(ctx, app, view, vec![egui::Event::PointerMoved(p)]);
+            let before = view.sys_star;
+            let z0 = view.sys_zoom;
+            frame(ctx, app, view, vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, 120.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            }]);
+            for _ in 0..30 {
+                frame(ctx, app, view, vec![]);
+            }
+            let f = view.sys_zoom / z0;
+            let want = p + (before - p) * f;
+            eprintln!("{focus:?} p={p:?} before={before:?} after={:?} want={want:?} zoom={}", view.sys_star, view.sys_zoom);
+            assert!(f > 1.05, "wheel did not zoom");
+            assert!((view.sys_star - want).length() < 2.0, "{focus:?}: star drifted: {:?} vs {want:?}", view.sys_star);
+        }
+    }
+
+    /// Scrolling over the system view keeps the point under the pointer
+    /// fixed, in single and binary systems and every framing.
+    #[test]
+    fn wheel_zoom_pivots_on_pointer() {
+        let ctx = egui::Context::default();
+        let mut app = App::with_game(42, 0);
+        let mut view = View::default();
+        check(&ctx, &app, &mut view, Focus::A);
+        let (pos, home) = {
+            let sim = app.sim();
+            (app.gal.system_ref(sim.sys_id).pos, sim.sys_id)
+        };
+        let binary = app
+            .gal
+            .neighbors(pos, 60.0, home)
+            .into_iter()
+            .map(|n| n.id)
+            .find(|&id| app.gal.system(id).companion.as_ref().is_some_and(|c| !c.p_type))
+            .expect("a binary system nearby");
+        app.sim.as_mut().unwrap().sys_id = binary;
+        for focus in [Focus::A, Focus::B, Focus::Both] {
+            check(&ctx, &app, &mut view, focus);
+        }
+    }
 }

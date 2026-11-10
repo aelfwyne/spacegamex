@@ -39,6 +39,8 @@ pub struct View {
     pub sys_pan: egui::Vec2,
     pub sys_focus: sysview::Focus,
     pub sys_last: u64,
+    /// Where star A was drawn last frame (tests check the zoom pivot).
+    pub sys_star: egui::Pos2,
 }
 
 impl Default for View {
@@ -54,6 +56,7 @@ impl Default for View {
             sys_pan: egui::Vec2::ZERO,
             sys_focus: sysview::Focus::A,
             sys_last: u64::MAX,
+            sys_star: egui::Pos2::ZERO,
         }
     }
 }
