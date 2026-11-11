@@ -48,7 +48,7 @@ fn focus_combo(ui: &mut Ui, sim: &Sim, acts: &mut Vec<Action>) {
 
 pub fn controls(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     let sim = app.sim();
-    let spec = sim.ship();
+    let spec = &sim.ship();
     ui.add_space(4.0);
 
     egui::CollapsingHeader::new(RichText::new("POWER & SYSTEMS").strong().color(ACCENT))
@@ -194,7 +194,7 @@ fn rate_label(ui: &mut Ui, r: f64) {
     }
 }
 
-fn back_row(ui: &mut Ui, title: &str, acts: &mut Vec<Action>) {
+pub fn back_row(ui: &mut Ui, title: &str, acts: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         if ui.button("← Back  [Esc]").clicked() {
             acts.push(Action::Back);
@@ -701,14 +701,16 @@ pub fn cargo_hold(ui: &mut Ui, sim: &Sim) {
 
 pub fn crew(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     let sim = app.sim();
-    let spec = sim.ship();
+    let spec = &sim.ship();
     back_row(ui, "CREW & PASSENGERS", acts);
     section(ui, "CAPTAIN");
     egui::Grid::new("captain").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
         kv(ui, "Name", RichText::new(sim.player_name()).strong());
         kv(ui, "Sex", sim.player_sex.name().into());
         kv(ui, "Age", format!("{:.0}", sim.player_age().floor()).into());
-        kv(ui, "Retires at", format!("about {:.0}", sim.retire_age.round()).into());
+        kv(ui, "Background", RichText::new(sim.background.name()).strong());
+        kv(ui, "", dim(sim.background.bonuses().join("  ·  ")));
+        kv(ui, "Hands over at", format!("about {:.0} (with a colony)", sim.retire_age.round()).into());
         let partner = match &sim.spouse {
             Some(sp) => format!("{} ({}, {})", sp.name, sp.sex.name().to_lowercase(), sp.species_name()),
             None => "none (recruit one at a port)".into(),
@@ -718,6 +720,8 @@ pub fn crew(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             kv(ui, "Pilot", format!("{} (skill {})", p.name, p.skill).into());
         }
     });
+    ui.add_space(4.0);
+    retire_button(ui, app, acts);
     ui.add_space(6.0);
     ui.label(RichText::new(format!("{} — crew complement {}", spec.name, spec.crew)).strong());
     egui::Grid::new("crew").num_columns(2).spacing([12.0, 2.0]).show(ui, |ui| {
@@ -771,7 +775,7 @@ pub fn crew(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
 
 pub fn systems(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     let sim = app.sim();
-    let spec = sim.ship();
+    let spec = &sim.ship();
     back_row(ui, "SHIP SYSTEMS", acts);
     ui.label(dim("Every system is automated, but you set the targets. Watch the power budget — spend too much and everything browns out."));
     ui.add_space(6.0);
@@ -1234,9 +1238,14 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         "Found a colony from the Planets screen while docked at a rocky world or moon. Check its habitability: a lethal world kills anyone without a dome.",
         "The Keelclipper needs a partner first (Trade › Port › recruit). A native partner makes the colony Hybrid and needs a Genetic Modification Kit for children.",
         "Few founders start below the galactic tech level and carry a genetic penalty: the long game. AI clusters keep (and slowly raise) the tech level.",
+        "A small colony has big families and can live off the land (hunting, gathering, farming: slow, hard labour) on a kind world; a big one needs supplies and comforts to keep growing. Your own couple only has children while you are home.",
         "Supplies wear out. Build a Programmable Manufacturing Plant to make them from raw materials, Bio-Domes on hostile worlds, then a Space Dock and a Business Center.",
-        "In colony mode a year passes in about 24 seconds at 1x. Fly off for supplies when needed: the colony carries on, slowly, without you.",
+        "In colony mode a year passes in about a minute and a half at 1x. Fly off for supplies when needed: the colony carries on, slowly, without you.",
         "Your captain retires at 60–80 and a successor (often your own child) takes over. The Family tab lets you click through generations.",
+        "Laws (Colony › Laws) trade one thing for another: bigger families, faster building, better health or tech, at a price. Enacting costs materials; a law stands at least a year.",
+        "Your background (chosen at New game) gave you credits and two lasting bonuses; see the Crew screen.",
+        "Retire whenever you like (Crew screen or the colony Overview). Winning, losing and retiring all score you, and the Scoreboard (title, S) keeps the best 100.",
+        "Statistics (L) count almost everything you do, the records you have seen, and every kind of thing you have found.",
     ] {
         ui.label(format!("•  {t}"));
     }
@@ -1254,7 +1263,7 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     section(ui, "MOUSE");
     ui.label("System view: click a world or moon to select it, double-click to shuttle there. Drag to pan, scroll to zoom; zoom in (or select a giant) to see its moons.");
     ui.label("Binary systems: the view buttons frame star A, star B or both; a wide companion is a second star you can shuttle to and scoop.");
-    ui.label("Star map: drag to pan, scroll to zoom, click to select, double-click to set the destination.");
+    ui.label("Star map: drag to pan, scroll to zoom, click to select, double-click to set the destination. An orange arrow at the edge points to your colony (click it to pan there); the side panel shows its distance, with Show and Best hop buttons.");
     ui.add_space(8.0);
     section(ui, "KEYS");
     let keys = [
@@ -1285,9 +1294,18 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     });
     ui.add_space(8.0);
     section(ui, "TIME");
-    ui.label("1x is real time (1 game second per real second); fast-forward compresses it. Time keeps flowing on every screen. In colony mode a year takes about 24 seconds at 1x (up to 60x). The clock shows Year and Day (365-day years).");
+    ui.label("1x is real time (1 game second per real second); fast-forward compresses it. Time keeps flowing on every screen. In colony mode a year takes about a minute and a half at 1x (up to 60x). The clock shows Year and Day (365-day years).");
     if let Some(sim) = app.sim.as_ref() {
         ui.add_space(6.0);
         ui.label(dim(format!("Galaxy seed: 0x{:012X} — share it to replay your universe.", sim.seed)));
+    }
+}
+
+/// Retire now and end the game (asks twice).
+pub fn retire_button(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    let label = if app.confirm_retire { "Confirm: retire and end the game" } else { "Retire…" };
+    let r = ui.add(egui::Button::new(RichText::new(label).color(if app.confirm_retire { BAD } else { TEXT })));
+    if r.on_hover_text("End this game now. You will see your score, and it goes on the scoreboard.").clicked() {
+        acts.push(Action::Retire);
     }
 }

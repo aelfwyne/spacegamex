@@ -9,6 +9,7 @@ pub mod encounter;
 pub mod mapview;
 pub mod paint;
 pub mod panels;
+pub mod stats;
 pub mod sysview;
 pub mod theme;
 pub mod title;
@@ -41,6 +42,9 @@ pub struct View {
     pub sys_last: u64,
     /// Where star A was drawn last frame (tests check the zoom pivot).
     pub sys_star: egui::Pos2,
+    /// Captain popup text fields.
+    pub cap_given: String,
+    pub cap_surname: String,
 }
 
 impl Default for View {
@@ -57,6 +61,8 @@ impl Default for View {
             sys_focus: sysview::Focus::A,
             sys_last: u64::MAX,
             sys_star: egui::Pos2::ZERO,
+            cap_given: String::new(),
+            cap_surname: String::new(),
         }
     }
 }
@@ -156,6 +162,7 @@ fn preview(app: &mut App, spec: &str) {
         "systems" => Screen::Systems,
         "resources" => Screen::Resources,
         "crew" => Screen::Crew,
+        "stats" => Screen::Stats,
         "trade" => Screen::Trade,
         "help" => Screen::Help,
         "trip" => {
@@ -253,6 +260,7 @@ pub fn draw(ui: &mut Ui, app: &App, view: &mut View) -> Vec<Action> {
     match app.screen {
         Screen::Title => title::title(ui, app, view, &mut acts),
         Screen::GameOver => title::game_over(ui, app, view, &mut acts),
+        Screen::Scores => title::scores(ui, app, view, &mut acts),
         Screen::Victory => colony::victory(ui, app, view, &mut acts),
         Screen::Help if app.sim.is_none() => {
             egui::CentralPanel::default().show(ui, |ui| panels::help(ui, app, &mut acts));
@@ -310,6 +318,7 @@ fn in_game(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                     Screen::Systems => panels::systems(ui, app, acts),
                     Screen::Trade => panels::trade(ui, app, acts),
                     Screen::Help => panels::help(ui, app, acts),
+                    Screen::Stats => stats::page(ui, app, acts),
                     _ => {}
                 });
             });
@@ -366,7 +375,7 @@ fn planet_colony_notes(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
 }
 
 fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
-    let spec = sim.ship();
+    let spec = &sim.ship();
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new("COLONIA GALACTICA").strong().size(20.0).color(ACCENT)).on_hover_text(crate::BUILD);
@@ -416,7 +425,7 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
             ui.label(dim(format!("on {}", c.world)));
             ui.label(format!("pop {}", colony::fmt_pop(c.population())));
             ui.label(dim(format!("· captain {} ({:.0})", sim.player_name(), sim.player_age().floor())));
-            ui.label(dim("· a year passes in ~24 s at 1x"));
+            ui.label(dim("· a year passes in ~96 s at 1x"));
             return;
         }
         if let Some(trip) = &sim.trip {
@@ -468,6 +477,7 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
         if sim.colony.is_some() && !sim.in_colony {
             tabs.push((Screen::Colony, "Colony", "O"));
         }
+        tabs.push((Screen::Stats, "Stats", "L"));
         for (s, label, key) in tabs {
             let blocked = s == Screen::Trade && app.trade_block_reason().is_some();
             let text = RichText::new(format!("{label} [{key}]")).strong();
@@ -564,10 +574,16 @@ mod smoke_tests {
         for &(w, h) in &[(800.0f32, 500.0f32), (1280.0, 800.0), (2560.0, 1440.0), (320.0, 240.0)] {
             let mut view = View::default();
             let mut title_app = App::new(42);
-            for s in [Screen::Title, Screen::Help] {
+            for s in [Screen::Title, Screen::Help, Screen::Scores] {
                 title_app.screen = s;
                 frame(&ctx, &title_app, &mut view, w, h);
             }
+            // The captain popup over the title.
+            title_app.screen = Screen::Title;
+            title_app.apply(Action::NewGame);
+            assert!(title_app.captain_open);
+            frame(&ctx, &title_app, &mut view, w, h);
+            title_app.apply(Action::CancelCaptain);
             for ship in 0..3usize {
                 let mut app = App::with_game(42, ship);
                 for _ in 0..60 {
@@ -590,6 +606,7 @@ mod smoke_tests {
                     Screen::Systems,
                     Screen::Trade,
                     Screen::Help,
+                    Screen::Stats,
                 ] {
                     app.screen = s;
                     frame(&ctx, &app, &mut view, w, h);
@@ -692,7 +709,7 @@ mod smoke_tests {
             }
             app.apply(Action::RandomParent);
             for &(w, h) in &[(800.0f32, 500.0f32), (1280.0, 800.0), (320.0, 240.0)] {
-                for tab in [ColonyTab::Overview, ColonyTab::Supplies, ColonyTab::Build, ColonyTab::Census, ColonyTab::Family, ColonyTab::Market] {
+                for tab in [ColonyTab::Overview, ColonyTab::Supplies, ColonyTab::Build, ColonyTab::Census, ColonyTab::Family, ColonyTab::Laws, ColonyTab::Market] {
                     app.apply(Action::SetColonyTab(tab));
                     app.screen = Screen::Cockpit;
                     frame(&ctx, &app, &mut view, w, h);
@@ -723,6 +740,57 @@ mod smoke_tests {
             assert_eq!(app.screen, Screen::GameOver);
             frame(&ctx, &app, &mut view, 1280.0, 800.0);
         }
+    }
+
+    /// Retiring asks twice, ends the game even with a colony standing,
+    /// and draws the score.
+    #[test]
+    fn retiring_ends_the_game_with_a_score() {
+        use crate::sim::colony::world;
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut view = View::default();
+        let mut app = App::with_game(42, 2);
+        let home = app.gal.home_id();
+        let idx = app.gal.system(home).planets.iter().position(|p| world::colonizable(p).is_ok()).unwrap();
+        app.sim.as_mut().unwrap().loc = crate::sim::Loc::Planet(idx);
+        app.apply(Action::FoundColony);
+        app.apply(Action::FoundColony);
+        assert!(app.sim().colony.is_some());
+        app.screen = Screen::Stats;
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
+        app.apply(Action::Retire);
+        assert!(app.sim().over.is_none(), "the first press only asks");
+        app.apply(Action::Retire);
+        assert_eq!(app.screen, Screen::GameOver);
+        assert_eq!(app.sim().outcome(), crate::sim::score::Outcome::Retired);
+        assert!(app.sim().scored);
+        assert!(app.last_rank.is_some());
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
+        // Recording again does nothing (the board file is shared by
+        // parallel tests, so check the game's own record).
+        let rank = app.last_rank;
+        app.record_score();
+        assert_eq!(app.last_rank, rank);
+        assert!(crate::sim::score::load().iter().any(|e| e.captain == app.sim().player_name()));
+    }
+
+    /// The popup's choices make the captain.
+    #[test]
+    fn the_captain_popup_starts_a_game() {
+        use crate::sim::background::{Background, Captain};
+        let mut app = App::new(42);
+        app.apply(Action::SelectShip(1));
+        app.apply(Action::NewGame);
+        app.apply(Action::StartGame(Captain { given: " ".into(), surname: "Vale".into(), sex: crate::sim::Sex::Female, background: Background::NobleHeir }));
+        assert!(app.sim.is_none(), "a blank name is refused");
+        app.apply(Action::StartGame(Captain { given: "Ada".into(), surname: "Vale".into(), sex: crate::sim::Sex::Female, background: Background::NobleHeir }));
+        let sim = app.sim();
+        assert_eq!(sim.player_name(), "Ada Vale");
+        assert_eq!(sim.player_sex, crate::sim::Sex::Female);
+        assert_eq!(sim.background, Background::NobleHeir);
+        assert_eq!(sim.credits, crate::sim::SHIPS[1].credits + 15_000.0);
+        assert_eq!(app.screen, Screen::Cockpit);
     }
 
     /// Every new kind of place, docked and viewed: close and wide binaries,

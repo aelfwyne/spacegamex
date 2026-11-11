@@ -8,7 +8,7 @@ use super::galaxy::Galaxy;
 use super::logbuf::Level;
 use super::state::{loc_label, Loc, Sim};
 use crate::rngx::{derive, mix64, name};
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
@@ -127,12 +127,12 @@ impl Quest {
     }
 }
 
-fn artifact_name(rng: &mut StdRng) -> String {
+fn artifact_name(rng: &mut GameRng) -> String {
     const KIND: [&str; 10] = ["Lens", "Engine", "Codex", "Shard", "Crown", "Lattice", "Seed", "Compass", "Heart", "Mirror"];
     format!("{} of {}", KIND[rng.random_range(0..KIND.len())], name(rng))
 }
 
-fn relic_name(rng: &mut StdRng) -> String {
+fn relic_name(rng: &mut GameRng) -> String {
     const KIND: [&str; 12] = ["idol", "tablet", "mask", "star chart", "reliquary", "music box", "seal", "urn", "astrolabe", "data core", "funeral crown", "flag"];
     const ADJ: [&str; 8] = ["Gilded", "Shattered", "Ancient", "Singing", "Obsidian", "Crystal", "Bronze", "Painted"];
     format!("{} {}", ADJ[rng.random_range(0..ADJ.len())], KIND[rng.random_range(0..KIND.len())])
@@ -164,10 +164,11 @@ impl Sim {
     }
 
     /// Salvage crews turned up a relic.
-    pub(crate) fn find_relic(&mut self, rng: &mut StdRng, place: &str) {
+    pub(crate) fn find_relic(&mut self, rng: &mut GameRng, place: &str) {
         let r = Relic { name: relic_name(rng), from: place.to_string(), value: rng.random_range(1_500.0..9_000.0f64).round() };
         self.log.push(self.t, Level::Good, format!("Among the ruins of {place}: a {} (worth about {:.0} cr to a collector).", r.name.to_lowercase(), r.value));
         self.relics.push(r);
+        self.stats.relics_found += 1;
     }
 
     /// Jobs on offer at this port (deterministic for the month).
@@ -231,6 +232,7 @@ impl Sim {
         if let Some(i) = self.quests.iter().position(|q| q.id == id) {
             let q = self.quests.remove(i);
             self.done_quests.push(q.id);
+            self.stats.quests_dropped += 1;
             self.log.push(self.t, Level::Info, format!("Job abandoned: {}.", q.title()));
         }
     }
@@ -264,6 +266,7 @@ impl Sim {
         match (&q.job, q.state) {
             (Job::Recover { artifact, .. }, QuestState::Recovered) if keep => {
                 self.artifacts.push(artifact.clone());
+                self.stats.artifacts_kept += 1;
                 self.log.push(self.t, Level::Good, format!("You keep the {}: {}.", artifact.name, artifact.power.describe()));
             }
             (Job::Recover { artifact, reward, .. }, QuestState::Recovered) => {
@@ -282,6 +285,7 @@ impl Sim {
                     "nothing more to fit".into()
                 };
                 self.log.push(self.t, Level::Good, format!("{} receives the {}: +{reward:.0} cr, and their yard fits {up}.", q.giver, artifact.name));
+                self.stats.artifacts_delivered += 1;
             }
             (Job::Relic { mult }, _) => {
                 if self.sys_id != q.giver_sys || !docked_port {
@@ -314,6 +318,7 @@ impl Sim {
         }
         self.quests.remove(i);
         self.done_quests.push(q.id);
+        self.stats.quests_done += 1;
         true
     }
 
@@ -328,6 +333,7 @@ impl Sim {
         }
         let r = self.relics.remove(idx);
         self.credits += r.value;
+        self.stats.relics_sold += 1;
         self.log.push(self.t, Level::Good, format!("Sold the {} for {:.0} cr.", r.name.to_lowercase(), r.value));
         true
     }

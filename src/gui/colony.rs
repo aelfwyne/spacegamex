@@ -178,6 +178,7 @@ pub fn panel(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             (ColonyTab::Build, "Build"),
             (ColonyTab::Census, "Census"),
             (ColonyTab::Family, "Family"),
+            (ColonyTab::Laws, "Laws"),
             (ColonyTab::Market, "Space dock"),
         ] {
             if ui.add(egui::Button::selectable(app.colony_tab == t, RichText::new(label).strong())).clicked() {
@@ -187,7 +188,8 @@ pub fn panel(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     });
     ui.separator();
     match app.colony_tab {
-        ColonyTab::Overview => overview(ui, sim, col, acts),
+        ColonyTab::Overview => overview(ui, app, sim, col, acts),
+        ColonyTab::Laws => laws(ui, col, acts),
         ColonyTab::Supplies => supplies(ui, sim, col, acts),
         ColonyTab::Build => build(ui, col, acts),
         ColonyTab::Census => census(ui, sim, col, acts),
@@ -202,7 +204,7 @@ fn stat(ui: &mut Ui, k: &str, frac: f64, label: String, tip: &str) {
     ui.end_row();
 }
 
-fn overview(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) {
+fn overview(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) {
     let pop = col.population();
     let now = years(sim.t);
     egui::Grid::new("col_over").num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
@@ -263,12 +265,67 @@ fn overview(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) 
     if ui.add_enabled(!sim.ship_dormant, egui::Button::new(RichText::new("Abandon colony").color(BAD))).clicked() {
         acts.push(Action::AbandonColony);
     }
+    ui.add_space(6.0);
+    super::panels::retire_button(ui, app, acts);
+}
+
+fn laws(ui: &mut Ui, col: &PlayerColony, acts: &mut Vec<Action>) {
+    use crate::sim::colony::law::{self, Law};
+    let cost = Law::cost_t(col.population());
+    ui.label(dim(format!(
+        "Laws trade one thing for another. Enacting one costs {cost:.0} t of materials (stockpile {:.0} t); a law stands for at least a year before it can be repealed. Repealing is free.",
+        col.materials
+    )));
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for l in Law::ALL {
+            let enacted = col.laws.iter().find(|e| e.law == l);
+            let blocked = l.conflicts().filter(|x| col.laws.iter().any(|e| e.law == *x));
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(l.name()).strong().color(if enacted.is_some() { GOOD } else { TEXT }));
+                    if enacted.is_some() {
+                        ui.label(RichText::new("IN FORCE").small().color(GOOD));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match enacted {
+                        Some(e) => {
+                            let left = law::MIN_TERM_Y - (col.clock - e.since);
+                            let b = ui.add_enabled(left <= 0.0, egui::Button::new("Repeal"));
+                            if b.on_disabled_hover_text(format!("Can be repealed in {:.0} months.", (left * 12.0).ceil())).clicked() {
+                                acts.push(Action::RepealLaw(l));
+                            }
+                        }
+                        None => {
+                            let ok = blocked.is_none() && col.materials >= cost;
+                            let why = match blocked {
+                                Some(x) => format!("Cannot stand alongside {}.", x.name()),
+                                None => format!("Needs {cost:.0} t of materials."),
+                            };
+                            if ui.add_enabled(ok, egui::Button::new(format!("Enact ({cost:.0} t)"))).on_disabled_hover_text(why).clicked() {
+                                acts.push(Action::EnactLaw(l));
+                            }
+                        }
+                    });
+                });
+                ui.label(dim(l.blurb()));
+                ui.label(RichText::new(format!("+ {}", l.pros())).color(GOOD));
+                ui.label(RichText::new(format!("− {}", l.cons())).color(BAD));
+            });
+            ui.add_space(3.0);
+        }
+    });
 }
 
 fn warnings(col: &PlayerColony) -> Vec<String> {
     let mut w = Vec::new();
     for (g, c) in &col.ind.coverage {
-        if *c < 0.95 {
+        if *g == Good::HydroKit && *c < 0.95 && col.ind.forage >= 0.95 {
+            w.push(format!("Hydroponics: only {:.0}% covered. The rest live off the land: hard, slow labour.", c * 100.0));
+            continue;
+        }
+        let c = if *g == Good::HydroKit { c.max(col.ind.forage) } else { *c };
+        if c < 0.95 {
             w.push(format!("{}: only {:.0}% covered.", g.name(), c * 100.0));
         }
     }
@@ -329,6 +386,9 @@ fn supplies(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) 
             ui.end_row();
         }
     });
+    if col.ind.forage >= 0.01 {
+        ui.label(dim(format!("Without hydroponics, hunting, gathering and farming can feed {:.0}% of the colony, at the cost of hard labour.", col.ind.forage * 100.0)));
+    }
     if col.hab.needs_domes() {
         ui.label(dim(format!("Shelter: {} Bio-Domes (10,000 each) + temporary domes (25 each). {:.0}% sheltered.", col.biodomes, col.ind.sheltered * 100.0)));
     }

@@ -69,6 +69,23 @@ You start at the origin system in one of three ships:
 | 2 | Cargomaster 'Providence' | 10 | 80 t | Real industrial capacity, and a hold big enough to found a small colony of ten. |
 | 3 | Ark 'Hesperide' | 10 + 500 pax | 600 t | Sails with a full colony kit for 500. Enormous plant, enormous mouth to feed. |
 
+**Your captain.** *New game* asks for your captain's given name, surname,
+sex and background. The background adds starting credits to the ship's
+and gives two lasting bonuses:
+
+| Background | Credits | Bonuses |
+|---|---|---|
+| Naval Academy | +1,000 | Attack +1 level, Defense +1 level |
+| Merchant Family | +6,000 | Buy 5% cheaper and sell 5% dearer; cargo hold +20% |
+| Asteroid Miner | +500 | Drone yield +25%; fabrication +20% |
+| Ship's Engineer | +1,000 | FTL wear −30%; hull self-repair +50% |
+| Field Medic | +1,500 | Crew health recovers 1.5× faster; colony infant and maternal deaths −25% |
+| Smuggler | +3,000 | Pirate encounters −30%; pirate tribute −40% |
+| Colonial Surveyor | +2,000 | Founding genetic penalty −40%; colony foraging and farming +25% |
+| Noble Heir | +15,000 | Partner searches 20% likelier to succeed; recruiting costs −50% |
+
+Your surname is the family name of your line in the colony.
+
 First, **survive**: keep the ship fuelled and the crew fed. Then, to
 **win**, found a colony and grow it to **1,000,000 people** (see *The
 colony* below). The ship has:
@@ -143,7 +160,14 @@ goods. About 2 systems in 100 hold any civilisation at all; under 1 in
   (1/10, 1 y) and Temporary Hazard Domes (1/25, 50 y, only off habitable
   worlds). Buy them at markets (Trade › Cargo). Shortfalls scale the
   penalties: no power cripples everything, no hydroponics means manual
-  labour, no AI clusters collapses the tech level.
+  labour, no AI clusters collapses the tech level. Without hydroponics a
+  colony on a habitable or marginal world lives off the land: hunting and
+  gathering feed a small one at once, fields take a few years to come in,
+  and either way it is hard labour that slows building and the economy.
+- **Family size:** a handful of settlers have big frontier families
+  whatever their comforts; as the colony grows, its birth rate comes to
+  depend on health, contentment, food and wealth. Your own couple only
+  has children while you are home.
 - **Founding:** dock at a rocky world or moon and use *Found colony* on the
   Planets screen. Habitability decides the domes: on a lethal world anyone
   without a dome dies. Ten founders (5 men, 5 women) or a captain and
@@ -153,7 +177,7 @@ goods. About 2 systems in 100 hold any civilisation at all; under 1 in
 - **Colony mode:** a turning view of the world with its city lights, and
   tabs for every stat, supplies, building, the census (age pyramid, Random
   parent, Oldest colonist) and a family tree you can click through. A year
-  passes in about 24 seconds at 1x, so a lifetime is about half an hour.
+  passes in about a minute and a half at 1x, so a lifetime is about two hours.
   Leave to fly for supplies; the colony carries on at ship time.
 - **The census** tracks every colonist individually up to 10,000 living;
   past that the bulk is counted by age, and anyone you look at is drawn
@@ -167,8 +191,41 @@ goods. About 2 systems in 100 hold any civilisation at all; under 1 in
 - **Succession:** the captain retires at 60–80 and a successor (often your
   own child) takes over seamlessly. Losing the ship with a colony standing
   is not the end.
+- **Laws** (Colony › Laws): each trades something for something else. Enacting
+  one costs materials (1% of the population in tonnes, at least 5 t); a law
+  stands for at least a year; repealing is free. Be Fruitful and Family
+  Planning exclude each other.
+
+  | Law | For | Against |
+  |---|---|---|
+  | Be Fruitful | Fertility +30% | Happiness −0.08, wealth −0.04 |
+  | Family Planning | Wealth +0.06, infant deaths −20% | Fertility −30% |
+  | Matchmaking Council | Singles pair up 95% of years instead of 70% | Happiness −0.04 |
+  | Labour Draft | Construction +30%, materials +15% | Happiness −0.10 |
+  | Rationing | Materials upkeep −25% | Health −0.04, happiness −0.05 |
+  | Public Healthcare | Mortality −15%, infant deaths −25% | Materials upkeep +20% |
+  | Compulsory Schooling | Tech growth +40%, tech decay halved | Workers −10% |
+  | Free Enterprise | Wealth +0.10 | Happiness −0.03, health −0.02 |
+  | Martial Law | World dangers −50% | Happiness −0.15 |
+  | Emancipation | Captive penalties halved | Materials −10% |
 - **Victory:** at a million, end the game in triumph, or abandon the colony
   (it carries on as an independent colony) and fly on.
+
+### Statistics, retirement and the scoreboard
+
+- **Statistics** (`L`): everything counted — jumps, light-years, landings,
+  mining, trade, credits earned and spent, pirates, jobs, relics, the colony —
+  plus records (hottest and coldest worlds, gravity, size, moons, stars) and
+  every kind of star, world, atmosphere, life and civilisation you have
+  found.
+- **Retire** (Crew screen, or the colony's Overview; asks twice) ends the
+  game whenever you choose. Winning, losing and retiring all show a score
+  and put it on the **Scoreboard** (title screen, `S`), kept in
+  `scores.json` beside the save.
+- **Score:** 100 per year survived, 50 per system visited, 2 per
+  light-year, credits ÷ 100, 250 per battle won, 300 per job, 500 per
+  artifact kept, 2,000 × log10(colony peak population + 1) and 25 per
+  colony birth; ×1.5 for victory, ×1 for retiring, ×0.75 for a loss.
 
 ### Cargo, pirates and quests
 
@@ -213,7 +270,7 @@ life support cannot outlast.
 1 real second = 1 game second by default, and the clock reads Year and
 Day (365-day years). `F` (or the buttons in the top bar) cycles time
 compression 1x / 10x / 60x / 600x / pause; during a flight `X` skips to
-arrival. In colony mode a year passes in about 24 seconds at 1x (up to 60x). The sim step
+arrival. In colony mode a year passes in about 96 seconds at 1x (up to 60x). The sim step
 is continuous, so fast-forward is exact, not a shortcut.
 
 ### How the ship is flown
@@ -243,7 +300,11 @@ the regression tests to prove the game is survivable.
 - **Star map:** drag to pan, scroll (or pinch) to zoom, click a star to
   select it, double-click to set it as the jump destination. The side panel
   lists every system within 30 ly with flight-time and fuel estimates, and
-  the **JUMP** button.
+  the **JUMP** button. Your colony is always marked: an orange arrow at the
+  chart's edge points home when it is off the chart (click it to pan
+  there), and the side panel gives its distance, a *Show* button and, when
+  it is out of jump range, a *Best hop* that picks the charted system
+  closest to it.
 - **Top bar:** time compression, save, help, quit, and tabs for every screen
   (Cockpit, Star map, Planets, Star, Ship systems, Resources, Crew, Trade,
   and Colony when you are away from it).
@@ -277,6 +338,7 @@ shortcuts.)
 | `M` | Star map (jump destinations) |
 | `K` | Trade: Resources, Cargo, Port (recruit, hire, upgrades) and Jobs; `Tab` switches tabs |
 | `O` | Colony (when away from it) |
+| `L` | Statistics |
 | `T` / `Enter` (cockpit) | Jump, once a destination is set and charged |
 | `F` | Time compression 1x→10x→60x→600x→paused |
 | `X` | Skip to arrival (in flight; works while paused) |
@@ -285,6 +347,9 @@ shortcuts.)
 | `H` | Help |
 | `Q` / `Ctrl+C` / closing the window | Save and quit |
 | `Esc` | Back |
+
+Title: `Enter` new game (opens the captain popup), `C` continue, `S`
+scoreboard.
 
 Map: `↑`/`↓` or `1`–`9` select, `Enter` sets/clears the destination, `T`
 jumps, `C` clears. Trade: `↑`/`↓` select, `B` buy, `S` sell, `+`/`-`

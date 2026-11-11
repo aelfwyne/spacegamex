@@ -5,7 +5,7 @@ use super::dice::{self, below, percent, unit, weighted};
 use crate::rngx;
 use crate::sim::star::{Star, StarClass, StarKind};
 use crate::sim::system::{BinaryLayout, Companion};
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 use rand::RngExt;
 
 /// Planet-count modifiers a star imposes on its system.
@@ -17,7 +17,7 @@ pub struct Mods {
     pub asteroid: i32,
 }
 
-fn age_metal(rng: &mut StdRng, kind: StarKind, class: StarClass) -> (f64, f64) {
+fn age_metal(rng: &mut GameRng, kind: StarKind, class: StarClass) -> (f64, f64) {
     let age = match (kind, class) {
         (StarKind::Giant, _) | (StarKind::WhiteDwarf, _) => rng_range(rng, 3.0, 11.0),
         (_, StarClass::B) => rng_range(rng, 0.05, 0.4),
@@ -28,7 +28,7 @@ fn age_metal(rng: &mut StdRng, kind: StarKind, class: StarClass) -> (f64, f64) {
     (age, met)
 }
 
-fn rng_range(rng: &mut StdRng, lo: f64, hi: f64) -> f64 {
+fn rng_range(rng: &mut GameRng, lo: f64, hi: f64) -> f64 {
     lo + (hi - lo) * unit(rng)
 }
 
@@ -47,12 +47,12 @@ fn ms_temp(class: StarClass, fine: u32) -> f64 {
     hi - (hi - lo) * (fine as f64 + 0.5) / 10.0
 }
 
-fn name_and_catalog(rng: &mut StdRng) -> (String, String) {
+fn name_and_catalog(rng: &mut GameRng) -> (String, String) {
     let catalog = format!("HD {}", rng.random_range(1_000..999_999));
     (rngx::name(rng), catalog)
 }
 
-pub fn build_star(rng: &mut StdRng, class: StarClass, kind: StarKind, fine: u32, mass_hint: Option<f64>) -> Star {
+pub fn build_star(rng: &mut GameRng, class: StarClass, kind: StarKind, fine: u32, mass_hint: Option<f64>) -> Star {
     let (name, catalog) = name_and_catalog(rng);
     let (age, metallicity) = age_metal(rng, kind, class);
     let (mass, radius, temp, code, desc) = match kind {
@@ -119,7 +119,7 @@ pub fn build_star(rng: &mut StdRng, class: StarClass, kind: StarKind, fine: u32,
 }
 
 /// The primary star roll (port of `buildAlienStar_`).
-pub fn roll_star(rng: &mut StdRng) -> (Star, Mods) {
+pub fn roll_star(rng: &mut GameRng) -> (Star, Mods) {
     let mut mods = Mods::default();
     let spec = dice::d(rng, 100);
     let fine = below(rng, 10) as u32;
@@ -171,7 +171,7 @@ pub fn roll_star(rng: &mut StdRng) -> (Star, Mods) {
     (star, mods)
 }
 
-fn ms_from_mass(rng: &mut StdRng, mass: f64) -> (Star, Mods) {
+fn ms_from_mass(rng: &mut GameRng, mass: f64) -> (Star, Mods) {
     let classes = [StarClass::B, StarClass::A, StarClass::F, StarClass::G, StarClass::K, StarClass::M];
     let class = classes.iter().copied().find(|c| mass >= c.mass_range().0).unwrap_or(StarClass::M);
     let (lo, hi) = class.mass_range();
@@ -203,7 +203,7 @@ pub fn hw_p(e: f64, mu: f64) -> f64 {
 }
 
 /// Mass ratio q = m2/m1 after Moe & Di Stefano (2017), simplified.
-fn sample_q(rng: &mut StdRng, m1: f64, layout: BinaryLayout, q_min: f64) -> f64 {
+fn sample_q(rng: &mut GameRng, m1: f64, layout: BinaryLayout, q_min: f64) -> f64 {
     use BinaryLayout::*;
     let (gamma, twin) = if m1 < 0.5 {
         match layout {
@@ -240,7 +240,7 @@ pub const BINARY_CHANCE: f64 = 5.0;
 
 /// Roll a companion for `primary` (port of `buildAlienBinary_`).
 /// Returns the companion description plus star B's planet modifiers.
-pub fn roll_binary(rng: &mut StdRng, primary: &Star) -> Option<(Companion, Mods)> {
+pub fn roll_binary(rng: &mut GameRng, primary: &Star) -> Option<(Companion, Mods)> {
     if !percent(rng, BINARY_CHANCE) {
         return None;
     }

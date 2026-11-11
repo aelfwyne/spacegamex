@@ -14,7 +14,7 @@ use super::ship::ShipSpec;
 use super::system::StarSystem;
 use crate::rngx::{derive, name};
 use rand::RngExt;
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -194,18 +194,7 @@ fn default_retire_age() -> f64 {
     70.0
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Stats {
-    pub jumps: u32,
-    pub dist_ly: f64,
-    pub scooped: f64,
-    pub mined: f64,
-    pub fabbed: f64,
-    pub trades: u32,
-    pub crew_lost: u32,
-    pub pax_lost: u32,
-    pub systems: u32,
-}
+pub use super::stats::Stats;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameOver {
@@ -321,6 +310,14 @@ pub struct Sim {
     /// A hired combat pilot.
     #[serde(default)]
     pub pilot: Option<Recruit>,
+    /// The captain's given name and surname (empty in old saves: see
+    /// `player_given`).
+    #[serde(default)]
+    pub given_name: String,
+    #[serde(default)]
+    pub surname: String,
+    #[serde(default)]
+    pub background: super::background::Background,
 
     // ---- commerce ----
     #[serde(default)]
@@ -366,9 +363,12 @@ pub struct Sim {
     /// The victory screen has been answered.
     #[serde(default)]
     pub victory_seen: bool,
+    /// This game's score is on the scoreboard.
+    #[serde(default)]
+    pub scored: bool,
 }
 
-fn poisson(rng: &mut StdRng, lambda: f64) -> u32 {
+fn poisson(rng: &mut GameRng, lambda: f64) -> u32 {
     let l = lambda.min(30.0);
     // Knuth: stop once the running product drops below e^-λ.
     let ll = (-l).exp();
@@ -657,8 +657,11 @@ fn buffer_target(r: Res) -> f64 {
 }
 
 impl Sim {
-    pub fn ship(&self) -> &'static ShipSpec {
-        ShipSpec::spec(self.ship_idx)
+    /// The ship's numbers, with the captain's background applied.
+    pub fn ship(&self) -> ShipSpec {
+        let mut s = *ShipSpec::spec(self.ship_idx);
+        self.background.apply(&mut s);
+        s
     }
 
     pub fn people(&self) -> f64 {
@@ -742,7 +745,7 @@ impl Sim {
 
     /// Reactor output (MW) at the current setting.
     pub fn power_gen(&self) -> f64 {
-        let spec = self.ship();
+        let spec = &self.ship();
         let faulted = self.faults.iter().any(|f| f.kind == FaultKind::Reactor);
         spec.reactor_mw * (self.reactor_pct as f64 / 100.0) * if faulted { 0.55 } else { 1.0 }
     }
@@ -750,7 +753,7 @@ impl Sim {
     /// Power draw (MW) of everything switched on and working right now.
     /// The one place the load is defined: the sim and the UI both use it.
     pub fn power_load(&self, sys: &StarSystem) -> f64 {
-        let spec = self.ship();
+        let spec = &self.ship();
         let busy = self.shuttle.is_some() || self.trip.is_some();
         let mut load = spec.ls_mw * (self.ls_eff as f64 / 100.0);
         // The scoop draws power wherever it is actually scooping (stars
@@ -783,7 +786,7 @@ impl Sim {
 
     /// Full-crew drone output, kg/h (ship × the Resources option).
     pub fn drone_rate(&self) -> f64 {
-        let spec = self.ship();
+        let spec = &self.ship();
         spec.drones as f64 * spec.drone_yield * self.opts.drone_mult() * self.crew_bonus()
     }
 
@@ -822,7 +825,7 @@ impl Sim {
         // hourly rate for a sliver of damage.
         if self.repair_on && self.repairing_hull && self.hull < hmax && self.inv.get(Res::Mat) > 0.0 {
             let need = (hmax - self.hull) / 0.5 * 0.8;
-            let use_mat = (0.8 * self.crew_bonus() * dt_h).min(need).min(self.inv.get(Res::Mat));
+            let use_mat = (0.8 * self.crew_bonus() * self.background.hull_repair_mult() * dt_h).min(need).min(self.inv.get(Res::Mat));
             self.inv.take(Res::Mat, use_mat);
             self.hull = (self.hull + (use_mat / 0.8) * 0.5).min(hmax);
         }
@@ -856,6 +859,8 @@ impl Sim {
         };
 
         let home = gal.home_id();
+        let mut stats = Stats { systems: 1, ..Default::default() };
+        stats.survey(gal.system(home));
         let (star_name, catalog) = {
             let st = &gal.system(home).star;
             (st.name.clone(), st.catalog.clone())
@@ -894,7 +899,7 @@ impl Sim {
             debt_crew: 0.0,
             debt_pax: 0.0,
             rates: BTreeMap::new(),
-            stats: Stats { systems: 1, ..Default::default() },
+            stats,
             log: Log::default(),
             over: None,
             visited: vec![home],
@@ -929,11 +934,16 @@ impl Sim {
             colony: None,
             ship_dormant: false,
             victory_seen: false,
+            given_name: String::new(),
+            surname: String::new(),
+            background: Default::default(),
+            scored: false,
         };
         // The captain's age and retirement: their own stream, so adding
         // them changed nothing else about a seed.
         let mut prng = derive(seed, 0x00ca_97a1);
-        sim.player_birth_y = -prng.random_range(25.0..35.0);
+        // Straight out of flight school.
+        sim.player_birth_y = -prng.random_range(22.0..25.0);
         sim.retire_age = prng.random_range(60.0..80.0);
         // The Ark sails with everything its colony will need.
         if spec.pax > 0 {
@@ -1125,7 +1135,7 @@ impl Sim {
         if !self.can_depart() {
             return false;
         }
-        let spec = self.ship();
+        let spec = &self.ship();
         let (tf_speed, _) = ShipSpec::throttle_factor(self.ftl_throttle);
         let from = gal.system_ref(self.sys_id).pos;
         let to_sys = gal.system_ref(dest);
@@ -1162,7 +1172,7 @@ impl Sim {
         if to == self.loc {
             return Err(ShuttleBlock::AlreadyThere);
         }
-        let spec = self.ship();
+        let spec = &self.ship();
         let sys = gal.system_ref(self.sys_id);
         let exists = match to {
             Loc::Star => true,
@@ -1215,7 +1225,7 @@ impl Sim {
                 self.log.push(self.t, Level::Warn, format!("No room: the {} tank is full.", r.name()));
                 return 0.0;
             }
-            let cost_per = price * buy_mult;
+            let cost_per = price * buy_mult * self.background.buy_mult();
             let kg = want_kg.min(stock).min(room).min(self.credits / cost_per.max(1e-9));
             if kg <= 0.0 {
                 self.log.push(self.t, Level::Warn, "Cannot afford that purchase.");
@@ -1234,7 +1244,7 @@ impl Sim {
                 self.log.push(self.t, Level::Warn, "They are not interested in that.");
                 return 0.0;
             }
-            let pay_per = price * sell_mult;
+            let pay_per = price * sell_mult * self.background.sell_mult();
             let kg = want_kg.min(self.inv.get(r));
             if kg <= 0.0 {
                 self.log.push(self.t, Level::Warn, format!("You have no {} to sell.", r.name()));
@@ -1255,7 +1265,7 @@ impl Sim {
             self.log.push(self.t, Level::Warn, "No shipyard here — hull repair needs an interstellar (T3) station.");
             return 0.0;
         }
-        let spec = self.ship();
+        let spec = &self.ship();
         let deficit = (spec.hull - self.hull).max(0.0);
         if deficit < 1.0 {
             self.log.push(self.t, Level::Info, "The yard inspects the hull: nothing to repair.");
@@ -1318,6 +1328,9 @@ impl Sim {
         if self.hull < hull_before && !self.artifacts.is_empty() {
             self.hull = hull_before - (hull_before - self.hull) * self.artifact_shield();
         }
+        if self.hull < hull_before {
+            self.stats.hull_damage += hull_before - self.hull;
+        }
         if self.over.is_none() && !self.in_colony {
             self.combat_tick(dt_h, gal);
         }
@@ -1327,7 +1340,7 @@ impl Sim {
     }
 
     fn advance_ship(&mut self, dt_h: f64, gal: &mut Galaxy) {
-        let spec = self.ship();
+        let spec = &self.ship();
         self.rng_step = self.rng_step.wrapping_add(1);
         let mut rng = derive(self.seed ^ 0x57e9_57e9, self.rng_step);
 
@@ -1384,11 +1397,19 @@ impl Sim {
                     self.committed_ore = None;
                     self.stats.jumps += 1;
                     self.stats.dist_ly += dist;
-                    if !self.visited.contains(&dest_id) {
+                    let first_visit = !self.visited.contains(&dest_id);
+                    if first_visit {
                         self.visited.push(dest_id);
                         self.stats.systems += 1;
                     }
                     let ds = gal.system(dest_id);
+                    if first_visit {
+                        self.stats.survey(ds);
+                    }
+                    let home_pos = super::Galaxy::pos_of(gal.home_id());
+                    let ds = gal.system(dest_id);
+                    let from_home = ((ds.pos[0] - home_pos[0]).powi(2) + (ds.pos[1] - home_pos[1]).powi(2)).sqrt();
+                    self.stats.farthest_ly = self.stats.farthest_ly.max(from_home);
                     let civ_msg = match &ds.civ {
                         Some(c) => {
                             let seat = loc_label(c.seat, ds);
@@ -1422,6 +1443,9 @@ impl Sim {
                 let to = mv.to;
                 self.loc = to;
                 self.shuttle = None;
+                if to.is_body() {
+                    self.stats.landings += 1;
+                }
                 let sysref = gal.system_ref(self.sys_id);
                 self.log.push(self.t, Level::Info, format!("Now at {}.", loc_label(to, sysref)));
             }
@@ -1680,6 +1704,7 @@ impl Sim {
             }
             if found_cr > 0.0 {
                 self.credits += found_cr;
+                self.stats.salvage_cr += found_cr;
                 self.log.push(self.t, Level::Good, format!("Salvage crews recovered intact equipment worth {found_cr:.0} cr."));
             }
             if let Some(what) = done {
@@ -1875,7 +1900,7 @@ impl Sim {
             0.0
         };
         if crew_drain < 1.0 {
-            let rec = if med_used > 0.0 { 4.5 } else { 3.0 };
+            let rec = (if med_used > 0.0 { 4.5 } else { 3.0 }) * self.background.crew_recovery_mult();
             self.crew.health = (self.crew.health + rec * dt_h).min(100.0);
         } else {
             self.crew.health = (self.crew.health - crew_drain * dt_h).max(0.0);
@@ -1885,7 +1910,7 @@ impl Sim {
             let pax_drain = crew_drain * 1.2;
             let pmed = if pax_drain < 1.0 { self.inv.take(Res::Med, 0.01 * self.pax.count as f64 * dt_h) } else { 0.0 };
             if pax_drain < 1.0 {
-                let rec = if pmed > 0.0 { 2.0 } else { 1.5 };
+                let rec = (if pmed > 0.0 { 2.0 } else { 1.5 }) * self.background.crew_recovery_mult();
                 self.pax.health = (self.pax.health + rec * dt_h).min(100.0);
             } else {
                 self.pax.health = (self.pax.health - pax_drain * dt_h).max(0.0);
@@ -2146,7 +2171,7 @@ impl Sim {
         if self.encounter.is_some() {
             self.auto_resolve_encounter();
         }
-        let spec = self.ship();
+        let spec = &self.ship();
         let hmax = spec.hull;
         let sys = gal.system_ref(self.sys_id);
         // Market info and local mineability up front: after the movement

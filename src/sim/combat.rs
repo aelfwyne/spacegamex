@@ -14,7 +14,7 @@ use super::opts::Risk;
 use super::res::Res;
 use super::state::Sim;
 use crate::rngx::{derive, name};
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
@@ -67,7 +67,7 @@ pub fn upgrade_cost(level: u8) -> f64 {
     4_000.0 * (level as f64 + 1.0)
 }
 
-fn band_name(rng: &mut StdRng) -> String {
+fn band_name(rng: &mut GameRng) -> String {
     const KIND: [&str; 8] = ["Kites", "Reavers", "Jackals", "Corsairs", "Wolves", "Knives", "Ravens", "Drifters"];
     format!("the {} {}", name(rng), KIND[rng.random_range(0..KIND.len())])
 }
@@ -75,7 +75,7 @@ fn band_name(rng: &mut StdRng) -> String {
 impl Sim {
     /// Your ship's attack and defense (hull class + upgrades + pilot).
     pub fn combat_stats(&self) -> (f64, f64) {
-        let spec = self.ship();
+        let spec = &self.ship();
         let class = match spec.crew {
             1 => (2.0, 2.0),
             n if n <= 10 && spec.pax == 0 => (3.0, 3.0),
@@ -117,10 +117,10 @@ impl Sim {
 
     /// The share of the cargo a tribute (paying up front) costs.
     pub fn tribute_share(&self) -> f64 {
-        if self.opts.risk == Risk::Tourist { 0.15 } else { 0.25 }
+        (if self.opts.risk == Risk::Tourist { 0.15 } else { 0.25 }) * self.background.tribute_mult()
     }
 
-    fn combat_rng(&mut self, salt: u64) -> StdRng {
+    fn combat_rng(&mut self, salt: u64) -> GameRng {
         self.rng_step = self.rng_step.wrapping_add(1);
         derive(self.seed ^ self.rng_step.rotate_left(23), salt)
     }
@@ -143,7 +143,7 @@ impl Sim {
         }
         let cargo = 1.0 + (self.hold.value() / 50_000.0).min(1.0);
         let civ = if tier == Some(CivTier::T3) { 0.5 } else { 1.0 };
-        let rate = self.opts.risk.combat_mult() * cargo * civ / MEAN_HOURS;
+        let rate = self.opts.risk.combat_mult() * cargo * civ * self.background.pirate_rate_mult() / MEAN_HOURS;
         let p = 1.0 - (-rate * dt_h).exp();
         let mut rng = self.combat_rng(0xb1_7a7e);
         if !rng.random_bool(p.clamp(0.0, 1.0)) {
@@ -162,6 +162,7 @@ impl Sim {
         let bounty = (1_500.0 * (attack + defense) / 2.0 * rng.random_range(0.7..1.3)).round();
         self.log.push(self.t, Level::Critical, format!("PIRATES! {} have locked on to you. Fight, flee or pay?", capitalize(&band)));
         self.encounter = Some(Encounter { band, attack, defense, stage: Stage::Approach, bounty });
+        self.stats.pirates_met += 1;
     }
 
     /// Resolve the player's choice for the current encounter.
@@ -170,12 +171,14 @@ impl Sim {
         let band = capitalize(&e.band);
         match (e.stage, choice) {
             (Stage::Approach, Choice::Pay) => {
+                self.stats.pirates_paid += 1;
                 let share = self.tribute_share();
                 let lost = self.take_tribute(share, false);
                 self.log.push(self.t, Level::Warn, format!("You pay {band} off: {lost}."));
                 self.encounter = None;
             }
             (Stage::Approach, Choice::Flee) => {
+                self.stats.pirates_fled += 1;
                 let mut rng = self.combat_rng(0xf1_ee);
                 if rng.random_bool(self.flee_chance()) {
                     self.log.push(self.t, Level::Good, format!("You outrun {band}. They break off."));
@@ -185,7 +188,10 @@ impl Sim {
                     self.fight(&e, 2);
                 }
             }
-            (Stage::Approach, Choice::Fight) => self.fight(&e, 3),
+            (Stage::Approach, Choice::Fight) => {
+                self.stats.pirates_fought += 1;
+                self.fight(&e, 3)
+            }
             (Stage::Won, Choice::Destroy) => {
                 let mut rng = self.combat_rng(0xde_57);
                 self.pending_bounty += e.bounty;
@@ -251,7 +257,7 @@ impl Sim {
         }
     }
 
-    fn lose_battle(&mut self, rng: &mut StdRng, e: &Encounter) {
+    fn lose_battle(&mut self, rng: &mut GameRng, e: &Encounter) {
         let band = capitalize(&e.band);
         let (lo, hi) = match self.opts.risk {
             Risk::Tourist => (0.25, 0.5),
@@ -303,7 +309,7 @@ impl Sim {
         if parts.is_empty() { "nothing worth taking".into() } else { parts.join(", ") }
     }
 
-    fn salvage_pirates(&mut self, rng: &mut StdRng, e: &Encounter) -> String {
+    fn salvage_pirates(&mut self, rng: &mut GameRng, e: &Encounter) -> String {
         let mut parts = Vec::new();
         let cr = (rng.random_range(300.0..1_500.0) * (e.attack + e.defense) / 4.0).round();
         self.credits += cr;

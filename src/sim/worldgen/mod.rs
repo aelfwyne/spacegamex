@@ -33,7 +33,7 @@ use super::system::{Companion, StarSystem};
 use crate::rngx::derive;
 use bodies::{Kind, Proto};
 use dice::{log10_range, percent, unit, weighted};
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 use rand::RngExt;
 use std::collections::BTreeMap;
 
@@ -123,6 +123,9 @@ pub fn generate(seed: u64, id: u64, pos: [f64; 2], is_home: bool, opts: &GalaxyO
 
     if !is_home {
         populate(&mut rng, &mut protos, opts);
+    } else {
+        // The home system gets no life: no living terrain either.
+        for_each_body(&mut protos, |b| life::strip_bio_terrain(&mut rng, b));
     }
 
     // ---- into game bodies ----
@@ -190,7 +193,7 @@ fn all_paths(protos: &[Proto]) -> Vec<(usize, Option<usize>)> {
 }
 
 /// Colony, life, sentients, societies and salvage.
-fn populate(rng: &mut StdRng, protos: &mut [Proto], opts: &GalaxyOpts) {
+fn populate(rng: &mut GameRng, protos: &mut [Proto], opts: &GalaxyOpts) {
     let paths = all_paths(protos);
 
     // ---- colony (first: Colony-Altered life depends on it) ----
@@ -337,11 +340,11 @@ fn populate(rng: &mut StdRng, protos: &mut [Proto], opts: &GalaxyOpts) {
     salvage_pass(rng, protos);
 }
 
-fn salvage_pass(rng: &mut StdRng, protos: &mut [Proto]) {
+fn salvage_pass(rng: &mut GameRng, protos: &mut [Proto]) {
     for_each_body(protos, |b| {
         let mut parts: Vec<String> = Vec::new();
         let mut kg = 0.0;
-        let mut add = |rng: &mut StdRng, what: &str, lo: f64, hi: f64| {
+        let mut add = |rng: &mut GameRng, what: &str, lo: f64, hi: f64| {
             parts.push(what.to_string());
             kg += (lo + (hi - lo) * unit(rng)) * 1000.0;
         };
@@ -383,7 +386,7 @@ fn host_star<'a>(host: Host, a: &'a Star, c: Option<&'a Companion>) -> &'a Star 
     }
 }
 
-fn finalize(rng: &mut StdRng, b: &Proto, a: &Star, comp: Option<&Companion>, opts: &GalaxyOpts) -> Planet {
+fn finalize(rng: &mut GameRng, b: &Proto, a: &Star, comp: Option<&Companion>, opts: &GalaxyOpts) -> Planet {
     let s = host_star(b.host, a, comp);
     let (lum, mass) = match (b.host, comp) {
         (Host::AB, Some(c)) => (a.lum + c.star.lum, a.mass + c.star.mass),
@@ -477,8 +480,8 @@ fn finalize(rng: &mut StdRng, b: &Proto, a: &Star, comp: Option<&Companion>, opt
     }
 }
 
-fn atmo_detail(rng: &mut StdRng, k: AtmoKind) -> Atmo {
-    let r = |rng: &mut StdRng, lo: f64, hi: f64| lo + (hi - lo) * unit(rng);
+fn atmo_detail(rng: &mut GameRng, k: AtmoKind) -> Atmo {
+    let r = |rng: &mut GameRng, lo: f64, hi: f64| lo + (hi - lo) * unit(rng);
     match k {
         AtmoKind::Thin => Atmo { pressure_bar: r(rng, 0.01, 0.3), n2: 0.8, o2: 0.0, co2: 0.15 },
         AtmoKind::Breathable => {
@@ -519,12 +522,12 @@ fn size_factor(km: f64) -> f64 {
 
 /// Mineable deposits (tons). Magnitudes follow the game's long-standing
 /// balance; what a world holds now follows from what it is.
-fn deposits(rng: &mut StdRng, b: &Proto, class: PlanetClass, opts: &GalaxyOpts) -> Vec<Deposit> {
+fn deposits(rng: &mut GameRng, b: &Proto, class: PlanetClass, opts: &GalaxyOpts) -> Vec<Deposit> {
     use tune::*;
     // The resources option scales how often optional deposits appear and
     // how big every deposit is.
     let (cm, tm) = (opts.deposit_chance_mult(), opts.deposit_tons_mult());
-    let percent = |rng: &mut StdRng, p: f64| percent(rng, (p * cm).min(95.0));
+    let percent = |rng: &mut GameRng, p: f64| percent(rng, (p * cm).min(95.0));
     let mut d: BTreeMap<Res, f64> = BTreeMap::new();
     let mut add = |r: Res, t: f64| *d.entry(r).or_insert(0.0) += t * tm;
     match class {
@@ -656,7 +659,7 @@ pub(crate) fn derive_civ(planets: &[Planet]) -> Option<Civ> {
     best
 }
 
-fn market(rng: &mut StdRng, civ: Option<&Civ>) -> (BTreeMap<Res, f64>, BTreeMap<Res, f64>) {
+fn market(rng: &mut GameRng, civ: Option<&Civ>) -> (BTreeMap<Res, f64>, BTreeMap<Res, f64>) {
     let mut prices = BTreeMap::new();
     let mut stock = BTreeMap::new();
     match civ.map(|c| (c.tier, c.small)) {
@@ -870,7 +873,7 @@ mod tests {
                     }
                 let bio_needed = p.terrain.iter().any(|t| terrain::entry(t).is_some_and(|e| e.tags & terrain::BIO != 0));
                 if bio_needed {
-                    assert!(p.life.is_some_and(|l| l.visible() || l == LifeType::Ocean), "{}: living terrain on a dead world", p.name);
+                    assert!(p.life.is_some_and(|l| l.visible() || l == LifeType::Ocean), "{}: living terrain on a dead world: life {:?} terrain {:?}", p.name, p.life, p.terrain);
                 }
                 for t in &p.terrain {
                     let Some(e) = terrain::entry(t) else {

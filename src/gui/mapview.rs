@@ -160,6 +160,40 @@ fn chart(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             }
         }
     }
+    // Your colony: marked where it is, or an arrow at the chart's edge
+    // pointing home (click it to pan there).
+    if let Some((cpos, dist, name)) = colony_fix(app) {
+        let cp = to_screen(cpos);
+        let col = super::sysview::COLONY_COL;
+        if rect.shrink(16.0).contains(cp) {
+            if sim.sys_id != app.sim().colony.as_ref().map_or(0, |c| c.sys_id) {
+                let d = 9.0;
+                let pts = vec![cp + vec2(-d, d * 0.2), cp + vec2(0.0, -d), cp + vec2(d, d * 0.2), cp + vec2(-d, d * 0.2)];
+                painter.add(egui::Shape::line(pts, Stroke::new(1.8, col)));
+                painter.text(cp + vec2(0.0, 10.0), Align2::CENTER_TOP, format!("COLONY · {dist:.1} ly"), FontId::proportional(11.0), col);
+            }
+        } else {
+            let dir = (cp - rect.center()).normalized();
+            // Where the ray from the centre leaves the (inset) chart.
+            let half = rect.shrink(34.0).size() / 2.0;
+            let t = (half.x / dir.x.abs().max(1e-6)).min(half.y / dir.y.abs().max(1e-6));
+            let tip = rect.center() + dir * t;
+            let side = vec2(-dir.y, dir.x);
+            let pts = vec![tip + dir * 12.0, tip - dir * 6.0 + side * 9.0, tip - dir * 6.0 - side * 9.0];
+            painter.add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
+            let label_at = tip - dir * 18.0;
+            let align = Align2([
+                if dir.x > 0.3 { egui::Align::Max } else if dir.x < -0.3 { egui::Align::Min } else { egui::Align::Center },
+                if dir.y > 0.3 { egui::Align::Max } else if dir.y < -0.3 { egui::Align::Min } else { egui::Align::Center },
+            ]);
+            painter.text(label_at, align, format!("{name} · {dist:.1} ly"), FontId::proportional(12.0), col);
+            let hit = egui::Rect::from_center_size(tip, vec2(36.0, 36.0));
+            if resp.clicked() && resp.interact_pointer_pos().is_some_and(|p| hit.contains(p)) {
+                view.map_pan = vec2((cpos[0] - here[0]) as f32, (cpos[1] - here[1]) as f32);
+            }
+        }
+    }
+
     // Here.
     paint::star(&painter, c0, 5.0, app.gal.system_ref(sim.sys_id).star.class.color(), 0.0);
     painter.circle_stroke(c0, 11.0, Stroke::new(2.0, GOOD));
@@ -167,7 +201,7 @@ fn chart(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
 
     // Legend.
     let lg = rect.left_bottom() + vec2(10.0, -10.0);
-    painter.text(lg, Align2::LEFT_BOTTOM, "drag: pan   wheel: zoom   click: select   double-click: set destination", FontId::proportional(11.5), DIM);
+    painter.text(lg, Align2::LEFT_BOTTOM, "drag: pan   wheel: zoom   click: select   double-click: set destination   orange arrow: your colony (click to pan there)", FontId::proportional(11.5), DIM);
     painter.text(lg + vec2(0.0, -16.0), Align2::LEFT_BOTTOM, "rings: magenta = interstellar natives   cyan = spacefaring natives   grey = pre-space   orange = colony   double dot = binary", FontId::proportional(11.5), DIM);
 
     if let Some(i) = hovered {
@@ -180,6 +214,17 @@ fn chart(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             acts.push(Action::MapSelect(i));
         }
     }
+}
+
+/// Your colony's position, distance from here (ly) and name, if you have
+/// one.
+fn colony_fix(app: &App) -> Option<([f64; 2], f64, String)> {
+    let sim = app.sim();
+    let c = sim.colony.as_ref()?;
+    let here = app.gal.system_ref(sim.sys_id).pos;
+    let pos = crate::sim::Galaxy::pos_of(c.sys_id);
+    let dist = ((pos[0] - here[0]).powi(2) + (pos[1] - here[1]).powi(2)).sqrt();
+    Some((pos, dist, c.name.clone()))
 }
 
 fn to_world(p: Pos2, center: Pos2, view: &View) -> Vec2 {
@@ -202,7 +247,7 @@ fn neighbor_facts(ui: &mut Ui, sim: &Sim, n: &Neighbor) {
 
 /// Flight estimates for a hop: (precharge h, flight h, H2 kg).
 fn hop_cost(sim: &Sim, dist: f64) -> (f64, f64, f64) {
-    let spec = sim.ship();
+    let spec = &sim.ship();
     let (sp, burn) = ShipSpec::throttle_factor(sim.ftl_throttle);
     let flight = dist / (spec.ftl_speed * sp);
     let pre = dist * spec.precharge_mwh_ly * (1.0 + sim.ftl_wear / 100.0) / spec.precharge_mw.max(1e-9);
@@ -224,6 +269,37 @@ fn side(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     // FTL status.
     let charge = sim.ftl_charge;
     bar_colored(ui, charge / 100.0, format!("FTL charge {charge:.0}%"), ui.available_width(), if charge >= 100.0 { GOOD } else { ACCENT });
+    // The way home.
+    if let Some((cpos, dist, name)) = colony_fix(app) {
+        let col_sys = sim.colony.as_ref().map(|c| c.sys_id);
+        ui.horizontal(|ui| {
+            let col = super::sysview::COLONY_COL;
+            if col_sys == Some(sim.sys_id) {
+                ui.label(RichText::new(format!("Colony {name}: in this system")).color(col));
+                return;
+            }
+            ui.label(RichText::new(format!("Colony {name}: {dist:.1} ly")).color(col));
+            if ui.small_button("Show").on_hover_text("Pan the chart to your colony.").clicked() {
+                let here = app.gal.system_ref(sim.sys_id).pos;
+                view.map_pan = vec2((cpos[0] - here[0]) as f32, (cpos[1] - here[1]) as f32);
+            }
+            if let Some(i) = app.map_list.iter().position(|n| Some(n.id) == col_sys) {
+                if ui.small_button("Select").clicked() {
+                    acts.push(Action::MapSelect(i));
+                }
+            } else if let Some((i, rest)) = app
+                .map_list
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (i, ((n.pos[0] - cpos[0]).powi(2) + (n.pos[1] - cpos[1]).powi(2)).sqrt()))
+                .filter(|&(_, d)| d < dist)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                && ui.small_button("Best hop").on_hover_text(format!("Select the charted system closest to the colony ({rest:.1} ly from it).")).clicked()
+            {
+                acts.push(Action::MapSelect(i));
+            }
+        });
+    }
 
     // Selected system card.
     if let Some(n) = app.map_list.get(app.map_sel) {
@@ -236,6 +312,12 @@ fn side(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                 }
             });
             neighbor_facts(ui, sim, n);
+            if let Some((cpos, _, _)) = colony_fix(app)
+                && sim.colony.as_ref().is_some_and(|c| c.sys_id != n.id)
+            {
+                let d = ((n.pos[0] - cpos[0]).powi(2) + (n.pos[1] - cpos[1]).powi(2)).sqrt();
+                ui.label(RichText::new(format!("{d:.1} ly from your colony")).color(super::sysview::COLONY_COL));
+            }
             let (pre, flight, h2) = hop_cost(sim, n.dist_ly);
             ui.label(format!("precharge ~{}   flight ~{}   H2 ~{:.0} kg", fmt_hours(pre), fmt_hours(flight), h2));
             ui.horizontal(|ui| {

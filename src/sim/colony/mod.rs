@@ -2,10 +2,11 @@
 //! long game of growing to a million people.
 //!
 //! Time runs fast in colony mode (about 24 real seconds per year at 1x, so
-//! a lifetime is roughly half an hour) and at ordinary ship time while the
+//! a lifetime is roughly two hours) and at ordinary ship time while the
 //! captain is away buying supplies.
 
 pub mod census;
+pub mod law;
 pub mod world;
 
 use super::cargo::{CargoMarket, Good, Offer};
@@ -15,7 +16,7 @@ use super::people::{years, HOURS_PER_YEAR};
 use super::planet::{Colony, ColonyTech};
 use super::res::Res;
 use super::state::{loc_label, Loc, Sim};
-use census::{Census, Event, Origin, Person, Rates};
+use census::{Census, Event, Origin, Person, Rates, ADULT};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,7 +25,7 @@ pub use world::Hab;
 /// Population that wins the game.
 pub const WIN_POP: f64 = 1_000_000.0;
 /// Real seconds per colony year at 1x in colony mode.
-pub const SECS_PER_COLONY_YEAR: f64 = 24.0;
+pub const SECS_PER_COLONY_YEAR: f64 = 96.0;
 /// The galactic standard tech level (a well-founded colony starts here).
 pub const STANDARD_TECH: f64 = 5.0;
 pub const MAX_TECH: f64 = 8.0;
@@ -101,6 +102,10 @@ pub struct Indicators {
     pub rates_mort: f64,
     pub rates_fert: f64,
     pub rates_infant: f64,
+    /// Share of the colony the land itself feeds by hand (hunting,
+    /// gathering, farming) where hydroponics fall short.
+    #[serde(default)]
+    pub forage: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +152,17 @@ pub struct PlayerColony {
     pub market: Option<CargoMarket>,
     #[serde(default)]
     pub ind: Indicators,
+    /// Laws in force.
+    #[serde(default)]
+    pub laws: Vec<law::Enacted>,
+    /// The founding captain's background (some of it shapes the colony).
+    #[serde(default)]
+    pub founder_bg: super::background::Background,
+    /// Births and deaths since founding (for the statistics).
+    #[serde(default)]
+    pub births_total: f64,
+    #[serde(default)]
+    pub deaths_total: f64,
 }
 
 /// Something the colony wants to tell the captain.
@@ -257,6 +273,22 @@ impl PlayerColony {
             coverage.insert(Good::HazardDome, sheltered);
         }
         let short = |g: Good| 1.0 - coverage[&g];
+        // Food: hydroponics, or the land. Hunting and gathering feed a
+        // small colony at once; fields take a few years to clear and plant
+        // but then feed any number. Either way it is hard, slow labour
+        // (`toil`), and a hostile world gives nothing outside the domes.
+        let fx = law::effects(&self.laws);
+        let land = match self.hab {
+            Hab::Habitable => 1.0,
+            Hab::Marginal => 0.6,
+            _ => 0.0,
+        } * self.founder_bg.land_mult();
+        let forage = (land * 300.0 / (300.0 + pop)).min(1.0);
+        let farm = (land * (0.3 + 0.7 * ((now - self.founded) / 5.0).clamp(0.0, 1.0))).min(1.0);
+        let hydro = coverage[&Good::HydroKit];
+        let fed_by_land = forage.max(farm);
+        let food_short = 1.0 - hydro.max(fed_by_land);
+        let toil = 1.0 - hydro;
         if self.hab == Hab::Lethal && exposed > 1e-6 {
             let n = (pop * exposed).floor();
             if n >= 1.0 {
@@ -276,10 +308,10 @@ impl PlayerColony {
 
         // ---- materials ----
         let tech_k = (self.tech / STANDARD_TECH).clamp(0.3, 1.5);
-        let labour_k = 1.0 - 0.5 * (1.0 - coverage[&Good::HydroKit]);
+        let labour_k = 1.0 - 0.5 * toil;
         // Hands dig a little; drones dig a lot.
-        let produce = pop * (0.15 * labour_k + 1.4 * coverage[&Good::ResDrones]) * (0.4 + 0.6 * self.richness) * tech_k;
-        let upkeep = pop * 0.3 * (1.0 + 0.5 * short(Good::Recycler));
+        let produce = pop * (0.15 * labour_k + 1.4 * coverage[&Good::ResDrones]) * (0.4 + 0.6 * self.richness) * tech_k * fx.produce;
+        let upkeep = pop * 0.3 * (1.0 + 0.5 * short(Good::Recycler)) * fx.upkeep;
         self.materials += (produce - upkeep) * dt;
         let shortage = self.materials < 0.0;
         if shortage {
@@ -288,21 +320,23 @@ impl PlayerColony {
 
         // ---- the colony's condition ----
         let captives = self.census.living.iter().filter(|&&i| self.census.people[i as usize].origin == Origin::Captive).count() as f64;
-        let cs = captives / pop;
+        let cs = captives / pop * fx.captives;
         let short_f = if shortage { 1.0 } else { 0.0 };
-        let labour_eff = 1.0 - 0.5 * short(Good::HydroKit);
+        let labour_eff = 1.0 - 0.5 * toil;
         // Wealth: what the world can support versus how many share it.
         let support = 20_000.0 * 10f64.powf(2.0 * self.richness) * (1.0 + 0.5 * (self.pmp > 0) as u8 as f64) * if self.business { 2.0 } else { 1.0 } * if self.dock { 1.5 } else { 1.0 };
         let w_target = (0.12 + 0.55 * support / (support + pop) + 0.08 * (self.tech - 3.0) / 2.0 + 0.12 * self.business as u8 as f64 + 0.08 * self.dock as u8 as f64
-            - 0.15 * short_f)
+            - 0.15 * short_f
+            + fx.wealth)
             .clamp(0.02, 1.0);
-        let h_target = (0.92 - 0.25 * short(Good::HydroKit) - 0.1 * short(Good::Recycler) - 0.15 * short(Good::MedKit) - dome_health - 0.5 * genetic
+        let h_target = (0.92 - 0.25 * food_short - 0.1 * short(Good::Recycler) - 0.15 * short(Good::MedKit) - dome_health - 0.25 * genetic
             - (self.danger - 0.002) * 5.0
             - 0.2 * cs
             + 0.02 * (self.tech - STANDARD_TECH)
             + 0.05 * self.wealth
             - 0.05 * short_f
-            + health_boost)
+            + health_boost
+            + fx.health)
             .clamp(0.05, 1.0);
         let hab_q = match self.hab {
             Hab::Habitable => 0.08,
@@ -310,8 +344,9 @@ impl PlayerColony {
             Hab::Hostile => -0.06,
             Hab::Lethal => -0.1,
         };
-        let p_target = (0.55 + 0.35 * (self.wealth - 0.4) + 0.4 * (self.health - 0.8) + hab_q - 0.8 * cs - 0.15 * short_f - 0.1 * short(Good::HydroKit)
-            + 0.08 * self.business as u8 as f64)
+        let p_target = (0.55 + 0.35 * (self.wealth - 0.4) + 0.4 * (self.health - 0.8) + hab_q - 0.8 * cs - 0.15 * short_f - 0.1 * toil
+            + 0.08 * self.business as u8 as f64
+            + fx.happy)
             .clamp(0.0, 1.0);
         let k = dt / 1.0; // ~1-year response
         self.wealth += (w_target - self.wealth) * k;
@@ -321,23 +356,33 @@ impl PlayerColony {
         // ---- tech: AI clusters keep it; without them it collapses ----
         let ai = coverage[&Good::AiCluster];
         if ai < 0.999 {
-            self.tech -= 0.5 * (1.0 - ai) * dt;
+            self.tech -= 0.5 * (1.0 - ai) * fx.tech_decay * dt;
         } else {
             let slow = if self.tech >= STANDARD_TECH { 0.4 } else { 1.0 };
-            self.tech += 0.125 * (pop / (pop + 3_000.0)) * slow * tech_boost * dt;
+            self.tech += 0.125 * (pop / (pop + 3_000.0)) * slow * tech_boost * fx.tech_growth * dt;
         }
         self.tech = self.tech.clamp(0.5, MAX_TECH);
 
         // ---- people ----
         let tech_gap = (STANDARD_TECH - self.tech).max(0.0);
+        // Family size: a handful of settlers on an empty world have big
+        // families whatever their comforts (only real sickness slows them).
+        // As the colony grows, how many children people have comes to
+        // depend on health, contentment, food and wealth.
+        let frontier = 150.0 / (150.0 + pop);
+        let comfort = (self.health / 0.9) * (0.6 + 0.4 * self.happiness) * (1.0 - 0.4 * food_short) * (1.15 - 0.3 * self.wealth);
+        let hardy = 0.6 + 0.4 * (self.health / 0.9).min(1.0);
+        let fert = (0.28 + 0.35 * frontier) * (frontier * hardy + (1.0 - frontier) * comfort) * dome_fert * fx.fert;
+        let bd = self.founder_bg.birth_death_mult();
         let rates = Rates {
-            mort_mult: ((1.0 + 2.5 * (0.9 - self.health)) * (1.0 + 0.08 * (STANDARD_TECH - self.tech))).clamp(0.6, 8.0),
-            hazard: self.danger + if self.hab == Hab::Hostile { 0.02 * exposed } else { 0.0 },
-            fert: 0.28 * (self.health / 0.9) * (0.6 + 0.4 * self.happiness) * (1.0 - 0.4 * short(Good::HydroKit)) * dome_fert * (1.15 - 0.3 * self.wealth),
-            infant: (0.004 + 0.15 * (1.0 - self.health) + 0.01 * tech_gap + 0.1 * genetic).clamp(0.002, 0.4),
-            maternal: (0.000_3 + 0.02 * (1.0 - self.health) + 0.002 * tech_gap).clamp(0.000_1, 0.05),
+            mort_mult: ((1.0 + 2.5 * (0.9 - self.health)) * (1.0 + 0.08 * (STANDARD_TECH - self.tech))).clamp(0.6, 8.0) * fx.mort,
+            hazard: (self.danger + if self.hab == Hab::Hostile { 0.02 * exposed } else { 0.0 }) * fx.hazard,
+            fert,
+            infant: ((0.004 + 0.15 * (1.0 - self.health) + 0.01 * tech_gap + 0.1 * genetic) * fx.infant * bd).clamp(0.001, 0.4),
+            maternal: ((0.000_3 + 0.02 * (1.0 - self.health) + 0.002 * tech_gap) * bd).clamp(0.000_05, 0.05),
             hybrid: self.hybrid && self.gene_kit,
         };
+        self.census.pair_bonus = fx.pairing;
         let mut events = Vec::new();
         self.census.step(now, dt, &rates, Some(self.player), player_home, &mut events);
         for e in events {
@@ -366,8 +411,8 @@ impl PlayerColony {
         }
 
         // ---- construction ----
-        let workers = self.census.workers(now);
-        let labour = workers * 0.25 * labour_eff * eff * dt;
+        let workers = self.census.workers(now) * fx.workers;
+        let labour = workers * 0.25 * labour_eff * eff * fx.build * dt;
         if let Some(c) = self.queue.first_mut() {
             let (mat_t, lab_y) = c.kind.cost();
             let mut frac = labour / lab_y;
@@ -406,6 +451,7 @@ impl PlayerColony {
             rates_mort: rates.mort_mult,
             rates_fert: rates.fert,
             rates_infant: rates.infant,
+            forage: fed_by_land,
         };
 
         if self.month == 0 {
@@ -415,6 +461,8 @@ impl PlayerColony {
 
     fn yearly(&mut self, now: f64, notes: &mut Vec<Note>) {
         self.census.yearly(now, self.hybrid && self.gene_kit);
+        self.births_total += self.census.last_year.births;
+        self.deaths_total += self.census.last_year.deaths;
         let pop = self.population();
         self.history.push([now as f32, pop as f32]);
         // The plant keeps everyone equipped (up to its capacity).
@@ -554,7 +602,7 @@ impl Sim {
         let sys = gal.system_ref(self.sys_id);
         let Some(p) = sys.site(self.loc) else { return Err("No world here.".into()) };
         world::colonizable(p).map_err(|e| e.to_string())?;
-        let spec = self.ship();
+        let spec = &self.ship();
         let pilot = self.pilot.is_some() as usize;
         let colonists = (self.crew.count - pilot + self.pax.count) as u32;
         if colonists < 2 {
@@ -618,13 +666,15 @@ impl Sim {
             parents_unseen: false,
             line: true,
         });
-        census.given.insert(player, self.player_name().to_string());
+        census.given.insert(player, self.player_given());
+        census.family.insert(player, self.player_surname());
         census.people[player as usize].line = true;
         let mut spouse_id = None;
         if let Some(sp) = &self.spouse {
             let id = census.add(Person {
                 female: sp.sex.is_female(),
-                born: (now - rng.random_range(22.0..34.0)) as f32,
+                // Near the captain's age (both adults).
+                born: (now - (now - self.player_birth_y + rng.random_range(-4.0..4.0)).max(ADULT + 2.0)) as f32,
                 died: None,
                 mother: None,
                 father: None,
@@ -653,7 +703,7 @@ impl Sim {
         let total = plan.colonists as usize;
         let mut females = census.people.iter().filter(|p| p.female).count();
         let mut placed = census.people.len();
-        let mut add = |census: &mut Census, given: Option<String>, rng: &mut rand::rngs::StdRng, age: f64| {
+        let mut add = |census: &mut Census, given: Option<String>, rng: &mut crate::rngx::GameRng, age: f64| {
             let remaining = total - placed;
             let want_f = (total / 2).saturating_sub(females);
             let female = if remaining > 0 { rng.random_range(0..remaining) < want_f } else { rng.random_bool(0.5) };
@@ -705,7 +755,7 @@ impl Sim {
             hybrid: plan.hybrid,
             gene_kit: plan.hybrid && plan.gene_kit,
             founders: plan.colonists,
-            genetic0: founding_genetic(n) + if plan.hybrid { 0.1 } else { 0.0 },
+            genetic0: (founding_genetic(n) + if plan.hybrid { 0.1 } else { 0.0 }) * self.background.genetic_mult(),
             tech: founding_tech(n),
             health: 0.85,
             happiness: 0.7,
@@ -718,6 +768,10 @@ impl Sim {
             business: false,
             queue: vec![],
             auto_build: true,
+            laws: vec![],
+            founder_bg: self.background,
+            births_total: 0.0,
+            deaths_total: 0.0,
             census,
             player,
             history: vec![[now as f32, n as f32]],
@@ -751,8 +805,9 @@ impl Sim {
             hab.name().to_lowercase()
         );
         self.colony = Some(colony);
+        self.stats.colonies_founded += 1;
         self.log.push(self.t, Level::Good, msg);
-        self.log.push(self.t, Level::Info, "Colony mode: a year passes in about 24 seconds at 1x. Leave to fly for supplies; the colony lives on without you.");
+        self.log.push(self.t, Level::Info, "Colony mode: a year passes in about a minute and a half at 1x. Leave to fly for supplies; the colony lives on without you.");
         Ok(())
     }
 
@@ -848,6 +903,7 @@ impl Sim {
             return Err("Without a ship there is nowhere to go.".into());
         }
         let Some(c) = self.colony.take() else { return Err("You have no colony.".into()) };
+        self.stats.colonies_abandoned += 1;
         let sys = gal.system(c.sys_id);
         if let Some(p) = sys.site_mut(c.loc) {
             p.colony = Some(c.as_independent());
@@ -857,6 +913,41 @@ impl Sim {
         sys.refresh_cargo_market(self.seed);
         self.in_colony = false;
         self.log.push(self.t, Level::Warn, format!("You leave {}. It carries on as an independent colony of {:.0}.", c.name, c.population()));
+        Ok(())
+    }
+
+    /// Put a law in force (costs materials).
+    pub fn enact_law(&mut self, l: law::Law) -> Result<(), String> {
+        let Some(c) = self.colony.as_mut() else { return Err("You have no colony.".into()) };
+        if c.laws.iter().any(|e| e.law == l) {
+            return Err(format!("{} is already law.", l.name()));
+        }
+        if let Some(x) = l.conflicts()
+            && c.laws.iter().any(|e| e.law == x)
+        {
+            return Err(format!("{} cannot stand alongside {}. Repeal it first.", l.name(), x.name()));
+        }
+        let cost = law::Law::cost_t(c.population());
+        if c.materials < cost {
+            return Err(format!("Enacting {} takes {cost:.0} t of materials; the stockpile has {:.0} t.", l.name(), c.materials));
+        }
+        c.materials -= cost;
+        c.laws.push(law::Enacted { law: l, since: c.clock });
+        self.stats.laws_enacted += 1;
+        self.log.push(self.t, Level::Good, format!("Law enacted: {}.", l.name()));
+        Ok(())
+    }
+
+    /// Take a law off the books (not within a year of enacting it).
+    pub fn repeal_law(&mut self, l: law::Law) -> Result<(), String> {
+        let Some(c) = self.colony.as_mut() else { return Err("You have no colony.".into()) };
+        let Some(i) = c.laws.iter().position(|e| e.law == l) else { return Err(format!("{} is not law.", l.name())) };
+        let held = c.clock - c.laws[i].since;
+        if held < law::MIN_TERM_Y {
+            return Err(format!("{} was enacted too recently to repeal (in {:.0} months).", l.name(), ((law::MIN_TERM_Y - held) * 12.0).ceil()));
+        }
+        c.laws.remove(i);
+        self.log.push(self.t, Level::Info, format!("Law repealed: {}.", l.name()));
         Ok(())
     }
 
@@ -933,7 +1024,13 @@ impl Sim {
         let boost = (self.artifact_tech_boost(), self.artifact_health_boost());
         let mut notes = Vec::new();
         if let Some(c) = self.colony.as_mut() {
+            let built = |c: &PlayerColony| c.pmp + c.biodomes + c.dock as u32 + c.business as u32;
+            let (b0, d0, n0) = (c.births_total, c.deaths_total, built(c));
             c.advance(now, home, boost, &mut notes);
+            self.stats.colony_births += c.births_total - b0;
+            self.stats.colony_deaths += c.deaths_total - d0;
+            self.stats.buildings += built(c).saturating_sub(n0);
+            self.stats.colony_peak = self.stats.colony_peak.max(c.population());
         }
         for (lvl, msg) in notes {
             self.log.push(self.t, lvl, msg);
@@ -984,6 +1081,7 @@ impl Sim {
         c.player = new;
         let p = c.census.people[new as usize].clone();
         let new_name = c.census.name(new);
+        let (new_given, new_surname) = (c.census.given_name(new), c.census.family_name(new));
         let kin = if p.mother == Some(old) || p.father == Some(old) {
             if p.female { "daughter" } else { "son" }
         } else if line.contains(&new) {
@@ -999,6 +1097,9 @@ impl Sim {
         if let Some(first) = self.crew.names.first_mut() {
             *first = new_name.clone();
         }
+        self.given_name = new_given;
+        self.surname = new_surname;
+        self.stats.successions += 1;
         self.log.push(self.t, Level::Good, format!("{old_name} retires at {old_age:.0}. A Suitable Replacement was Chosen: your {kin} {new_name}, {:.0}.", p.age(now).floor()));
     }
 
@@ -1135,11 +1236,141 @@ mod tests {
         assert!(sim.colony.as_ref().unwrap().units(Good::MedKit) > 0);
     }
 
+    fn captain(bg: crate::sim::background::Background) -> crate::sim::background::Captain {
+        crate::sim::background::Captain { given: "Ada".into(), surname: "Vale".into(), sex: crate::sim::Sex::Male, background: bg }
+    }
+
+    #[test]
+    fn backgrounds_give_money_and_bonuses() {
+        use crate::sim::background::Background as B;
+        for b in B::ALL {
+            let (mut sim, _gal) = at_world(1, Hab::Habitable);
+            let base = sim.credits;
+            sim.apply_captain(&captain(b));
+            assert_eq!(sim.credits, base + b.money(), "{b:?}");
+        }
+        let (mut sim, _) = at_world(1, Hab::Habitable);
+        let cargo = sim.ship().cargo_t;
+        sim.apply_captain(&captain(B::MerchantFamily));
+        assert!((sim.ship().cargo_t - cargo * 1.2).abs() < 1e-9);
+        let (mut sim, _) = at_world(1, Hab::Habitable);
+        sim.apply_captain(&captain(B::NavalAcademy));
+        assert_eq!((sim.attack_lvl, sim.defense_lvl), (1, 1));
+        let (mut sim, _) = at_world(1, Hab::Habitable);
+        let y = sim.ship().drone_yield;
+        sim.apply_captain(&captain(B::AsteroidMiner));
+        assert!(sim.ship().drone_yield > y);
+        let (mut sim, mut gal) = at_world(1, Hab::Habitable);
+        sim.apply_captain(&captain(B::ColonialSurveyor));
+        sim.found_colony(&mut gal).unwrap();
+        assert!((sim.colony.as_ref().unwrap().genetic0 - founding_genetic(10.0) * 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_captains_surname_runs_in_the_colony() {
+        let (mut sim, mut gal) = at_world(1, Hab::Habitable);
+        sim.apply_captain(&captain(Default::default()));
+        sim.found_colony(&mut gal).unwrap();
+        let c = sim.colony.as_ref().unwrap();
+        assert_eq!(c.census.name(c.player), "Ada Vale");
+        // A child of the captain's line carries the name.
+        let mut census = c.census.clone();
+        let kid = census.add(census::Person {
+            female: true,
+            born: 1.0,
+            died: None,
+            mother: census.people[c.player as usize].spouse,
+            father: Some(c.player),
+            spouse: None,
+            alien: false,
+            origin: Origin::Born,
+            due: None,
+            unseen: vec![],
+            parents_unseen: false,
+            line: true,
+        });
+        assert_eq!(census.family_name(kid), "Vale");
+    }
+
+    #[test]
+    fn laws_cost_conflict_and_change_the_colony() {
+        use law::Law;
+        let (mut sim, mut gal) = at_world(2, Hab::Habitable);
+        sim.found_colony(&mut gal).unwrap();
+        sim.colony.as_mut().unwrap().materials = 0.0;
+        assert!(sim.enact_law(Law::BeFruitful).is_err(), "no materials");
+        sim.colony.as_mut().unwrap().materials = 100.0;
+        sim.enact_law(Law::BeFruitful).unwrap();
+        assert!(sim.colony.as_ref().unwrap().materials < 100.0);
+        assert!(sim.enact_law(Law::FamilyPlanning).is_err(), "exclusive");
+        assert!(sim.repeal_law(Law::BeFruitful).is_err(), "too soon");
+        run_years(&mut sim, &mut gal, 1.1);
+        sim.repeal_law(Law::BeFruitful).unwrap();
+        assert_eq!(sim.stats.laws_enacted, 1);
+        // Fertility follows the law.
+        let fert = |laws: &[Law]| {
+            let (mut sim, mut gal) = at_world(2, Hab::Habitable);
+            sim.found_colony(&mut gal).unwrap();
+            let c = sim.colony.as_mut().unwrap();
+            c.laws = laws.iter().map(|&l| law::Enacted { law: l, since: c.clock }).collect();
+            run_years(&mut sim, &mut gal, 0.5);
+            sim.colony.as_ref().unwrap().ind.rates_fert
+        };
+        let (none, more, fewer) = (fert(&[]), fert(&[Law::BeFruitful]), fert(&[Law::FamilyPlanning]));
+        assert!(more > none * 1.2 && fewer < none * 0.8, "{fewer} {none} {more}");
+    }
+
+    #[test]
+    fn statistics_count_the_colony_and_the_worlds() {
+        let (mut sim, mut gal) = at_world(2, Hab::Habitable);
+        assert!(sim.stats.found.contains_key("Star classes"), "the home system is surveyed");
+        assert!(sim.stats.extremes.contains_key("Hottest world"));
+        sim.found_colony(&mut gal).unwrap();
+        run_years(&mut sim, &mut gal, 3.0);
+        assert_eq!(sim.stats.colonies_founded, 1);
+        assert!(sim.stats.colony_births > 0.0);
+        assert!(sim.stats.colony_peak >= 510.0);
+    }
+
     #[test]
     fn founding_tech_and_genetics_scale_with_founders() {
         assert!((founding_tech(510.0) - STANDARD_TECH).abs() < 0.01);
         assert!(founding_tech(10.0) < 3.6 && founding_tech(2.0) <= 2.0 + 1e-9);
         assert!(founding_genetic(2.0) > founding_genetic(10.0));
         assert_eq!(founding_genetic(500.0), 0.0);
+    }
+
+    /// Two settlers on a kind world, with nothing but each other: big
+    /// frontier families and what the land gives should carry most such
+    /// colonies past the first generations.
+    #[test]
+    fn a_lone_couple_can_take_root_on_a_kind_world() {
+        let n = 20;
+        let mut grew = 0;
+        for seed in 0..n {
+            let mut gal = Galaxy::new(1000 + seed);
+            let mut sim = Sim::new_game(1000 + seed, 0, &mut gal);
+            let home = gal.home_id();
+            let idx = gal.system(home).planets.iter().position(|p| world::colonizable(p).is_ok()).expect("a rocky world");
+            {
+                let p = &mut gal.system(home).planets[idx];
+                p.gravity = 1.0;
+                p.life = None;
+                p.atmosphere = Some(AtmoKind::Breathable);
+                p.temp_band = TempBand::Temperate;
+            }
+            sim.loc = Loc::Planet(idx);
+            let who = crate::sim::state::Recruit { name: "Pat".into(), sex: sim.player_sex.opposite(), species: None, skill: 0 };
+            sim.crew.names.push(who.name.clone());
+            sim.crew.count += 1;
+            sim.spouse = Some(who);
+            sim.found_colony(&mut gal).expect("founded");
+            sim.retire_age = 200.0;
+            run_years(&mut sim, &mut gal, 75.0);
+            if sim.colony.as_ref().unwrap().population() >= 4.0 {
+                grew += 1;
+            }
+        }
+        assert!(grew * 2 >= n, "only {grew}/{n} couples took root");
     }
 }

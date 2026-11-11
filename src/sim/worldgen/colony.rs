@@ -6,7 +6,7 @@ use super::dice::{self, d6, r2d6, r3d6, weighted};
 use super::life::round_population;
 use crate::rngx;
 use crate::sim::planet::{Colony, ColonyTech};
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 
 /// Per-system chance (%) that someone planted a colony here, given a world
 /// that can take one. Tuned with `life::SENTIENT_SCALE` so trade stays about
@@ -15,7 +15,7 @@ pub const COLONY_CHANCE: f64 = 1.6;
 /// Colonies are planted by interstellar powers, so they skew established.
 const FOUNDER_BONUS: i32 = 2;
 
-fn colony_name(rng: &mut StdRng) -> String {
+fn colony_name(rng: &mut GameRng) -> String {
     let root = rngx::name(rng);
     match dice::below(rng, 6) {
         0 => format!("New {root}"),
@@ -27,7 +27,7 @@ fn colony_name(rng: &mut StdRng) -> String {
     }
 }
 
-fn missions(rng: &mut StdRng, count: i32, m: i32) -> String {
+fn missions(rng: &mut GameRng, count: i32, m: i32) -> String {
     let mut out: Vec<&str> = Vec::new();
     for _ in 0..count {
         let r = r2d6(rng) + m;
@@ -52,7 +52,7 @@ fn missions(rng: &mut StdRng, count: i32, m: i32) -> String {
     out.join(", ")
 }
 
-fn orbit_result(rng: &mut StdRng, roll: i32, items: &mut Vec<&'static str>) {
+fn orbit_result(rng: &mut GameRng, roll: i32, items: &mut Vec<&'static str>) {
     let it = match roll {
         r if r <= 4 => {
             if dice::below(rng, 2) == 1 { Some("Wreckage") } else { None }
@@ -75,7 +75,7 @@ fn orbit_result(rng: &mut StdRng, roll: i32, items: &mut Vec<&'static str>) {
         }
 }
 
-fn colonial_orbit(rng: &mut StdRng, m: i32) -> String {
+fn colonial_orbit(rng: &mut GameRng, m: i32) -> String {
     let mut items = Vec::new();
     let roll = r2d6(rng) + m;
     if roll <= 11 {
@@ -90,7 +90,7 @@ fn colonial_orbit(rng: &mut StdRng, m: i32) -> String {
     items.join(", ")
 }
 
-pub fn found_colony(rng: &mut StdRng, b: &Proto, founders: String) -> Colony {
+pub fn found_colony(rng: &mut GameRng, b: &Proto, founders: String) -> Colony {
     let roll = r2d6(rng) + b.mods.colony + FOUNDER_BONUS;
     let mut mission_mod = b.mods.mission;
     let mut orbit_mod = b.mods.orbit;

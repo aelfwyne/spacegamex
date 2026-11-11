@@ -23,6 +23,47 @@ impl Sim {
         self.crew.names.first().map(|s| s.as_str()).unwrap_or("the captain")
     }
 
+    /// The captain's given name (old saves: the first word of the name).
+    pub fn player_given(&self) -> String {
+        if !self.given_name.is_empty() {
+            return self.given_name.clone();
+        }
+        self.player_name().split_whitespace().next().unwrap_or("Captain").to_string()
+    }
+
+    /// The captain's surname (old saves: the rest of the name, or a
+    /// derived one).
+    pub fn player_surname(&self) -> String {
+        if !self.surname.is_empty() {
+            return self.surname.clone();
+        }
+        let rest: Vec<&str> = self.player_name().split_whitespace().skip(1).collect();
+        if rest.is_empty() {
+            let mut rng = derive(self.seed, 0x5a_7a3e);
+            name(&mut rng)
+        } else {
+            rest.join(" ")
+        }
+    }
+
+    /// Set up the captain chosen at the start of a new game.
+    pub fn apply_captain(&mut self, c: &super::background::Captain) {
+        self.given_name = c.given.trim().to_string();
+        self.surname = c.surname.trim().to_string();
+        self.player_sex = c.sex;
+        self.background = c.background;
+        let full = format!("{} {}", self.given_name, self.surname);
+        match self.crew.names.first_mut() {
+            Some(n) => *n = full,
+            None => self.crew.names.push(full),
+        }
+        self.credits += c.background.money();
+        let (a, d) = c.background.combat_levels();
+        self.attack_lvl += a;
+        self.defense_lvl += d;
+        self.log.push(self.t, Level::Info, format!("Captain {} ({}) takes command.", self.player_name(), c.background.name()));
+    }
+
     /// The captain's age in years.
     pub fn player_age(&self) -> f64 {
         years(self.t) - self.player_birth_y
@@ -46,6 +87,7 @@ impl Sim {
                 self.log.push(self.t, Level::Warn, format!("Nobody here sells {g}."));
                 return 0.0;
             };
+            let price = price * self.background.buy_mult();
             let stock = market.offers[&g].stock;
             let room = (self.ship().cargo_t - self.hold.mass_t()).max(0.0);
             let fit = (room / g.mass_t() + 1e-9).floor() as u32;
@@ -69,6 +111,7 @@ impl Sim {
             self.credits -= cost;
             self.hold.add(g, k);
             self.stats.trades += 1;
+            self.stats.goods_bought += k;
             self.log.push(self.t, Level::Good, format!("Bought {k} × {g} for {cost:.0} cr."));
             -cost
         } else {
@@ -76,6 +119,7 @@ impl Sim {
                 self.log.push(self.t, Level::Warn, format!("Nobody here buys {g}."));
                 return 0.0;
             };
+            let price = price * self.background.sell_mult();
             let k = self.hold.take(g, n);
             if k == 0 {
                 self.log.push(self.t, Level::Warn, format!("You have no {g} to sell."));
@@ -90,6 +134,7 @@ impl Sim {
             let pay = k as f64 * price;
             self.credits += pay;
             self.stats.trades += 1;
+            self.stats.goods_sold += k;
             self.log.push(self.t, Level::Good, format!("Sold {k} × {g} for {pay:.0} cr."));
             pay
         }
@@ -111,7 +156,7 @@ impl Sim {
             self.log.push(self.t, Level::Warn, "Recruiting needs a planetary or interstellar civilisation.");
             return false;
         };
-        let cost = recruit_cost(tier);
+        let cost = recruit_cost(tier) * self.background.recruit_cost_mult();
         if self.credits < cost {
             self.log.push(self.t, Level::Warn, format!("A search costs {cost:.0} cr. You cannot afford it."));
             return false;
@@ -119,7 +164,7 @@ impl Sim {
         self.credits -= cost;
         self.rng_step += 1;
         let mut rng = derive(self.seed ^ self.rng_step.rotate_left(29), 0x5e_a7c4);
-        let chance = if tier == CivTier::T3 { 0.5 } else { 0.3 };
+        let chance = (if tier == CivTier::T3 { 0.5 } else { 0.3 } + self.background.recruit_chance_bonus()).min(1.0);
         // The search takes an hour of ship time.
         self.advance(1.0, gal);
         let civ = gal.system_ref(self.sys_id).civ.clone();
@@ -135,6 +180,7 @@ impl Sim {
             None => who.name.clone(),
         };
         self.log.push(self.t, Level::Good, format!("{what} ({}) joins you as your partner.", who.sex.name().to_lowercase()));
+        self.stats.partners += 1;
         if who.species.is_some() {
             self.log.push(self.t, Level::Info, "A human-native couple needs a Genetic Modification Kit to have children. A colony you found together will be Hybrid.");
         }
@@ -154,7 +200,7 @@ impl Sim {
             self.log.push(self.t, Level::Warn, "Pilots are hired at planetary or interstellar ports.");
             return false;
         };
-        let cost = pilot_cost(tier);
+        let cost = pilot_cost(tier) * self.background.recruit_cost_mult();
         if self.credits < cost {
             self.log.push(self.t, Level::Warn, format!("A pilot costs {cost:.0} cr. You cannot afford one."));
             return false;
@@ -166,6 +212,7 @@ impl Sim {
         let sex = if rng.random_bool(0.5) { Sex::Male } else { Sex::Female };
         let who = Recruit { name: name(&mut rng), sex, species: None, skill };
         self.log.push(self.t, Level::Good, format!("Hired pilot {} (skill {skill}) for {cost:.0} cr.", who.name));
+        self.stats.pilots += 1;
         self.crew.names.push(who.name.clone());
         self.crew.count += 1;
         self.pilot = Some(who);
@@ -195,7 +242,7 @@ mod tests {
         assert!(sim.hold.mass_t() <= sim.ship().cargo_t);
         let solo = Sim::new_game(42, 0, &mut gal);
         assert!(solo.hold.is_empty());
-        assert!((25.0..35.0).contains(&solo.player_age()));
+        assert!((22.0..25.0).contains(&solo.player_age()));
         assert!((60.0..80.0).contains(&solo.retire_age));
     }
 

@@ -10,7 +10,7 @@ use super::dice::{self, percent, r2d6, weighted};
 use super::terrain;
 use crate::rngx;
 use crate::sim::planet::{AtmoKind, Geosphere, LifeType, NativeSociety, NativeTech, TempBand};
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 
 /// Global knob on sentient odds: keeps native civilisations about as rare
 /// as the game's civilisations have always been.
@@ -110,7 +110,7 @@ fn weights(b: &Proto, colony_active: bool) -> Vec<(LifeType, f64)> {
     }
 }
 
-pub fn roll_life(rng: &mut StdRng, b: &Proto, scale: f64) -> Option<LifeType> {
+pub fn roll_life(rng: &mut GameRng, b: &Proto, scale: f64) -> Option<LifeType> {
     let c = chance(b) * scale;
     if c <= 0.0 || !percent(rng, c) {
         return None;
@@ -144,7 +144,7 @@ fn life_fits_feature(life: Option<LifeType>, feature: &str) -> bool {
 
 /// Forests, jungles and sea creatures mean life: either upgrade the life to
 /// a full ecosystem or, where life is impossible, reroll those features.
-pub fn reconcile_terrain(rng: &mut StdRng, b: &mut Proto) {
+pub fn reconcile_terrain(rng: &mut GameRng, b: &mut Proto) {
     if !terrain::has_tag(&b.terrain, terrain::BIO) {
         return;
     }
@@ -173,6 +173,20 @@ pub fn reconcile_terrain(rng: &mut StdRng, b: &mut Proto) {
         (LifeType::Hostile, 15.0),
         (LifeType::ColonyAltered, if colony { 15.0 } else { 0.0 }),
     ]));
+}
+
+/// Reroll forests, reefs and the like on a world left without life.
+pub fn strip_bio_terrain(rng: &mut GameRng, b: &mut Proto) {
+    if b.life.is_some() || !terrain::has_tag(&b.terrain, terrain::BIO) {
+        return;
+    }
+    let ctx = b.ctx();
+    for i in 0..b.terrain.len() {
+        if !life_fits_feature(None, &b.terrain[i]) {
+            let existing = b.terrain.clone();
+            b.terrain[i] = terrain::pick_replacement(rng, &ctx, &existing, false);
+        }
+    }
 }
 
 /// Colony-Altered life only exists where a colony brought its crops.
@@ -207,7 +221,7 @@ pub fn tech_weights(rarer: bool, adv: f64) -> Vec<(NativeTech, f64)> {
 
 /// How many sentient species evolved here (each needs the previous one).
 /// `mult` scales the first roll (the civilisation option).
-pub fn roll_sentients(rng: &mut StdRng, life: LifeType, mult: f64) -> u8 {
+pub fn roll_sentients(rng: &mut GameRng, life: LifeType, mult: f64) -> u8 {
     let [a, b, c] = life.sentient_odds();
     let mut n = 0;
     if percent(rng, (a * SENTIENT_SCALE * mult).min(95.0)) {
@@ -240,7 +254,7 @@ pub fn expansion_chance(tech: NativeTech) -> f64 {
     }
 }
 
-pub fn species_name(rng: &mut StdRng) -> String {
+pub fn species_name(rng: &mut GameRng) -> String {
     rngx::name(rng)
 }
 
@@ -275,7 +289,7 @@ pub fn round_population(n: f64) -> f64 {
 }
 
 /// The civilisation on the world where a species evolved.
-pub fn society(rng: &mut StdRng, species: String, count: u8, tech: NativeTech, colony_tech: Option<crate::sim::planet::ColonyTech>) -> NativeSociety {
+pub fn society(rng: &mut GameRng, species: String, count: u8, tech: NativeTech, colony_tech: Option<crate::sim::planet::ColonyTech>) -> NativeSociety {
     let tier = tech.tier();
     let base = base_population(tech);
     let mut pop = base * r2d6(rng) as f64;
@@ -363,6 +377,6 @@ pub fn fmt_population(n: f64) -> String {
 }
 
 /// Picks one item uniformly (re-exported for the pipeline).
-pub fn pick_index(rng: &mut StdRng, n: usize) -> usize {
+pub fn pick_index(rng: &mut GameRng, n: usize) -> usize {
     dice::below(rng, n as i32) as usize
 }

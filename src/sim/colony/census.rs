@@ -10,9 +10,20 @@
 //! Nobody stores a name: names are derived from the record id, with the
 //! family name passed down the father's line.
 
-use crate::rngx::{derive, mix64};
-use rand::rngs::StdRng;
+use crate::rngx::derive;
 use rand::RngExt;
+
+/// The census's own random numbers: the game generator, keyed through the
+/// MurmurHash3 finalizer so its streams stay apart from the galaxy's.
+type CensusRng = crate::rngx::GameRng;
+
+fn fmix64(mut k: u64) -> u64 {
+    k ^= k >> 33;
+    k = k.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    k ^= k >> 33;
+    k = k.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    k ^ (k >> 33)
+}
 use serde::{Deserialize, Serialize};
 
 /// Living individual records before newborns go to the cohorts.
@@ -150,9 +161,19 @@ pub struct Census {
     /// Draws made for materialisation (keeps it deterministic).
     #[serde(default)]
     pub draws: u64,
+    /// Babies' sexes drawn so far: their own stream, apart from every
+    /// other roll.
+    #[serde(default)]
+    pub sex_draws: u64,
     /// Given names fixed by the story (the founding crew).
     #[serde(default)]
     pub given: std::collections::BTreeMap<u32, String>,
+    /// Family names fixed by the story (the captain's), by line founder.
+    #[serde(default)]
+    pub family: std::collections::BTreeMap<u32, String>,
+    /// Added to the yearly chance that singles pair up (laws).
+    #[serde(default)]
+    pub pair_bonus: f64,
     #[serde(default)]
     pub this_year: YearStats,
     #[serde(default)]
@@ -175,9 +196,16 @@ impl Census {
         self.people.get(id as usize)
     }
 
-    fn rng(&mut self, salt: u64) -> StdRng {
+    fn rng(&mut self, salt: u64) -> CensusRng {
         self.draws += 1;
-        derive(self.seed ^ mix64(self.draws), salt)
+        crate::rngx::seeded(fmix64(self.seed ^ fmix64(self.draws ^ salt.rotate_left(29))))
+    }
+
+    /// A baby's sex: a fair coin from a stream used for nothing else.
+    pub fn sex_roll(&mut self) -> bool {
+        self.sex_draws += 1;
+        let mut r = crate::rngx::seeded(fmix64(self.seed ^ 0x5e_c5_0f_ba_b1_e5 ^ fmix64(self.sex_draws)));
+        r.random::<u64>() >> 63 == 1
     }
 
     pub fn add(&mut self, p: Person) -> u32 {
@@ -253,6 +281,9 @@ impl Census {
             if steps > 10_000 {
                 break;
             }
+        }
+        if let Some(f) = self.family.get(&root) {
+            return f.clone();
         }
         let mut rng = derive(self.seed ^ 0xfa_3117, root as u64);
         crate::rngx::name(&mut rng)
@@ -379,8 +410,8 @@ impl Census {
         let alien = self.people[mother as usize].alien;
         let line = self.people[mother as usize].line || father.is_some_and(|f| self.people[f as usize].line);
         for b in births {
+            let female = self.sex_roll();
             let mut rng = self.rng(0xc4_11d);
-            let female = rng.random_bool(0.5);
             let age = (now - b as f64).max(0.0);
             let a = (age as usize).min(MAX_AGE);
             let alive = rng.random_bool(survival(age, &Rates::default()).clamp(0.0, 1.0))
@@ -595,7 +626,7 @@ impl Census {
                     self.this_year.infant_deaths += 1.0;
                 }
                 if !self.demographic || line || alien {
-                    let female = rng.random_bool(0.5);
+                    let female = self.sex_roll();
                     let died = infant_dies.then(|| (now + rng.random_range(0.0..0.9)) as f32);
                     if died.is_some() {
                         self.this_year.deaths += 1.0;
@@ -615,7 +646,7 @@ impl Census {
                         line,
                     });
                 } else if !infant_dies {
-                    let s = rng.random_bool(0.5) as usize;
+                    let s = self.sex_roll() as usize;
                     self.cohorts[0][s] += 1.0;
                     self.people[id as usize].unseen.push(now as f32);
                 } else {
@@ -738,6 +769,11 @@ impl Census {
         self.last_year = std::mem::take(&mut self.this_year);
     }
 
+    fn parent_child(&self, a: u32, b: u32) -> bool {
+        let (pa, pb) = (&self.people[a as usize], &self.people[b as usize]);
+        pa.mother == Some(b) || pa.father == Some(b) || pb.mother == Some(a) || pb.father == Some(a)
+    }
+
     fn related(&self, a: u32, b: u32) -> bool {
         let (pa, pb) = (&self.people[a as usize], &self.people[b as usize]);
         // Parent and child, or siblings.
@@ -786,6 +822,9 @@ impl Census {
                 if gap > 15.0 {
                     continue;
                 }
+                if self.parent_child(m, w) {
+                    continue;
+                }
                 let rel = self.related(m, w);
                 // Prefer unrelated partners; relatives only if nobody else.
                 let better = match best {
@@ -797,7 +836,7 @@ impl Census {
                 }
             }
             if let Some((wi, _, _)) = best
-                && rng.random_bool(0.7)
+                && rng.random_bool((0.7 + self.pair_bonus).clamp(0.0, 1.0))
             {
                 taken[wi] = true;
                 let w = women[wi];
@@ -957,5 +996,25 @@ mod tests {
         let kid = c.people.iter().position(|p| p.father.is_some()).unwrap() as u32;
         let dad = c.people[kid as usize].father.unwrap();
         assert_eq!(c.family_name(kid), c.family_name(dad));
+    }
+
+    #[test]
+    fn babies_sexes_are_a_fair_coin_without_streaks() {
+        for seed in [1u64, 42, 10_171_699_353_412_291_677] {
+            let mut c = Census::new(seed, 0.0);
+            let n = 100_000;
+            let rolls: Vec<bool> = (0..n).map(|_| c.sex_roll()).collect();
+            let f = rolls.iter().filter(|&&b| b).count() as f64 / n as f64;
+            let same = rolls.windows(2).filter(|w| w[0] == w[1]).count() as f64 / (n - 1) as f64;
+            // Runs of one sex: about as long as a fair coin makes them.
+            let (mut longest, mut run) = (1, 1);
+            for w in rolls.windows(2) {
+                run = if w[0] == w[1] { run + 1 } else { 1 };
+                longest = longest.max(run);
+            }
+            assert!((0.49..0.51).contains(&f), "girls {f}");
+            assert!((0.49..0.51).contains(&same), "same as last {same}");
+            assert!(longest < 25, "a run of {longest}");
+        }
     }
 }

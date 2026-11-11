@@ -4,8 +4,10 @@ use super::paint;
 use super::theme::*;
 use super::View;
 use crate::game::{Action, App, Screen};
+use crate::sim::background::Captain;
 use crate::sim::save;
-use crate::sim::{fmt_daytime, fmt_kg, Abundance, GalaxyOpts, Risk, Sex, SHIPS};
+use crate::sim::score::{self, Outcome};
+use crate::sim::{fmt_daytime, fmt_kg, Abundance, Background, GalaxyOpts, Risk, Sex, SHIPS};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, RichText, Sense, Shape, Stroke, Ui};
 
 /// The galaxy option rows under the title buttons. Each change rebuilds the
@@ -33,26 +35,6 @@ fn galaxy_options(ui: &mut Ui, opts: GalaxyOpts, acts: &mut Vec<Action>) {
     row(ui, "Resources", res);
     row(ui, "Civilization", civ);
     row(ui, "Risk", risk);
-}
-
-/// The captain's sex (matters for recruiting a partner and founding a
-/// colony with one).
-fn captain_row(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
-    const LABEL_W: f32 = 110.0;
-    const BTN_W: f32 = 96.0;
-    let row_w = LABEL_W + 3.0 * BTN_W + 3.0 * ui.spacing().item_spacing.x;
-    ui.horizontal(|ui| {
-        ui.add_space(((ui.available_width() - row_w) / 2.0).max(0.0));
-        ui.add_sized(vec2(LABEL_W, 24.0), egui::Label::new(dim("Captain")));
-        for x in Sex::ALL {
-            let sel = app.title_sex == x;
-            let b = egui::Button::selectable(sel, RichText::new(x.name()).color(if sel { KEY } else { TEXT })).min_size(vec2(BTN_W, 24.0));
-            if ui.add(b).on_hover_text("Your captain. A partner recruited at a port is of the opposite sex.").clicked() && !sel {
-                acts.push(Action::SetSex(x));
-            }
-        }
-        ui.add_space(BTN_W);
-    });
 }
 
 /// A simple vector silhouette per hull, pointing right.
@@ -171,7 +153,7 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                ui.add_space(((ui.available_width() - 560.0) / 2.0).max(0.0));
+                ui.add_space(((ui.available_width() - 720.0) / 2.0).max(0.0));
                 let big = |s: &str| egui::Button::new(RichText::new(s).size(17.0).strong()).min_size(vec2(130.0, 36.0));
                 if ui.add(big("New game  [Enter]")).clicked() {
                     acts.push(Action::NewGame);
@@ -184,6 +166,9 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                 {
                     acts.push(Action::Continue);
                 }
+                if ui.add(big("Scoreboard  [S]")).clicked() {
+                    acts.push(Action::Open(Screen::Scores));
+                }
                 if ui.add(big("Help  [H]")).clicked() {
                     acts.push(Action::Open(Screen::Help));
                 }
@@ -193,11 +178,150 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             });
             ui.add_space(14.0);
             galaxy_options(ui, app.gal.opts, acts);
-            captain_row(ui, app, acts);
             ui.add_space(8.0);
             ui.label(dim("Pick a ship with 1–3 or the arrow keys, or double-click a card."));
             ui.add_space(6.0);
             ui.label(dim(crate::BUILD));
+        });
+    });
+    if app.captain_open {
+        captain_popup(ui.ctx(), app, view, acts);
+    }
+}
+
+/// New game: who is the captain?
+fn captain_popup(ctx: &egui::Context, app: &App, view: &mut View, acts: &mut Vec<Action>) {
+    if view.cap_given.is_empty() && view.cap_surname.is_empty() {
+        let (g, s) = app.random_names(view.anim_t.to_bits());
+        view.cap_given = g;
+        view.cap_surname = s;
+    }
+    let ship = SHIPS[app.title_sel.min(SHIPS.len() - 1)];
+    egui::Window::new(RichText::new("YOUR CAPTAIN").strong().color(ACCENT))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .default_width(560.0)
+        .show(ctx, |ui| {
+            ui.label(dim(format!("Fresh out of flight school, taking command of the {}.", ship.name)));
+            ui.add_space(6.0);
+            egui::Grid::new("cap_names").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+                for (label, which) in [("Given name", 0u64), ("Surname", 1u64)] {
+                    ui.label(label);
+                    let buf = if which == 0 { &mut view.cap_given } else { &mut view.cap_surname };
+                    ui.add(egui::TextEdit::singleline(buf).desired_width(260.0).char_limit(24));
+                    if ui.button("↻").on_hover_text("Another name").clicked() {
+                        let (g, s) = app.random_names(view.anim_t.to_bits() ^ (which + 1));
+                        if which == 0 { view.cap_given = g } else { view.cap_surname = s }
+                    }
+                    ui.end_row();
+                }
+                ui.label("Sex");
+                ui.horizontal(|ui| {
+                    for x in Sex::ALL {
+                        if ui.add(egui::Button::selectable(app.title_sex == x, x.name())).on_hover_text("A partner recruited at a port is of the opposite sex.").clicked() {
+                            acts.push(Action::SetSex(x));
+                        }
+                    }
+                });
+                ui.end_row();
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new("Background").strong());
+            egui::Grid::new("cap_bg").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                for (i, b) in Background::ALL.into_iter().enumerate() {
+                    let sel = app.title_background == b;
+                    let r = card_frame()
+                        .stroke(Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { KEY } else { Color32::from_rgb(40, 52, 75) }))
+                        .show(ui, |ui| {
+                            ui.set_width(250.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(b.name()).strong().color(if sel { KEY } else { TEXT }));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(RichText::new(format!("+{:.0} cr", b.money())).color(GOOD));
+                                });
+                            });
+                            ui.label(dim(b.blurb()));
+                            for bonus in b.bonuses() {
+                                ui.label(format!("•  {bonus}"));
+                            }
+                        })
+                        .response
+                        .interact(Sense::click());
+                    if r.clicked() {
+                        acts.push(Action::SetBackground(b));
+                    }
+                    if i % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let ok = !view.cap_given.trim().is_empty() && !view.cap_surname.trim().is_empty();
+                let start = egui::Button::new(RichText::new("Take command").strong().size(16.0)).min_size(vec2(160.0, 32.0));
+                if ui.add_enabled(ok, start).on_disabled_hover_text("Your captain needs a name and a surname.").clicked() {
+                    acts.push(Action::StartGame(Captain {
+                        given: view.cap_given.trim().to_string(),
+                        surname: view.cap_surname.trim().to_string(),
+                        sex: app.title_sex,
+                        background: app.title_background,
+                    }));
+                    view.cap_given.clear();
+                    view.cap_surname.clear();
+                }
+                if ui.add(egui::Button::new("Cancel  [Esc]").min_size(vec2(100.0, 32.0))).clicked() {
+                    acts.push(Action::CancelCaptain);
+                }
+            });
+        });
+}
+
+/// The scoreboard: every finished game, best first.
+pub fn scores(ui: &mut Ui, _app: &App, view: &mut View, acts: &mut Vec<Action>) {
+    egui::CentralPanel::default().frame(egui::Frame::new().fill(BG_DEEP)).show(ui, |ui| {
+        let rect = ui.max_rect();
+        paint::starfield(ui.painter(), rect, 0x5c0e, 1.2, view.anim_t as f32);
+        ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            ui.label(RichText::new("SCOREBOARD").size(40.0).strong().color(ACCENT));
+            ui.add_space(10.0);
+        });
+        let board = score::load();
+        if board.is_empty() {
+            ui.vertical_centered(|ui| ui.label(dim("No finished games yet. Retire, win, or go down fighting to make the board.")));
+        } else {
+            egui::ScrollArea::vertical().max_height((rect.height() - 180.0).max(120.0)).show(ui, |ui| {
+                egui::Grid::new("board").num_columns(9).striped(true).spacing([16.0, 4.0]).show(ui, |ui| {
+                    for h in ["#", "Captain", "Score", "End", "Ship", "Background", "Years", "Colony peak", "Date"] {
+                        ui.label(dim(h));
+                    }
+                    ui.end_row();
+                    for (i, e) in board.iter().enumerate() {
+                        let col = match e.outcome {
+                            Outcome::Victory => GOOD,
+                            Outcome::Retired => TEXT,
+                            Outcome::Lost => BAD,
+                        };
+                        ui.label(dim(format!("{}", i + 1)));
+                        ui.label(RichText::new(&e.captain).strong());
+                        ui.label(RichText::new(super::colony::fmt_pop(e.score as f64)).strong().color(KEY));
+                        ui.label(RichText::new(e.outcome.name()).color(col));
+                        ui.label(&e.ship);
+                        ui.label(&e.background);
+                        ui.label(format!("{:.1}", e.years));
+                        ui.label(if e.colony_peak > 0.0 { super::colony::fmt_pop(e.colony_peak) } else { "—".into() });
+                        ui.label(dim(&e.date));
+                        ui.end_row();
+                    }
+                });
+            });
+        }
+        ui.add_space(12.0);
+        ui.vertical_centered(|ui| {
+            if ui.add(egui::Button::new(RichText::new("Back  [Esc]").size(17.0)).min_size(vec2(160.0, 36.0))).clicked() {
+                acts.push(Action::Back);
+            }
         });
     });
 }
@@ -209,13 +333,18 @@ pub fn game_over(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>
         paint::starfield(&painter, rect, 0xdead, 1.2, view.anim_t as f32);
         let Some(sim) = app.sim.as_ref() else { return };
         let Some(over) = sim.over.as_ref() else { return };
-        if over.cause != "Victory" {
+        let outcome = sim.outcome();
+        if outcome == Outcome::Lost {
             painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(60, 0, 0, 70));
         }
         ui.vertical_centered(|ui| {
             ui.add_space((rect.height() * 0.12).min(90.0));
-            let won = over.cause == "Victory";
-            ui.label(RichText::new(if won { "COLONY TRIUMPHANT" } else { "SHIP LOST" }).size(52.0).strong().color(if won { GOOD } else { CRIT }));
+            let (head, col) = match outcome {
+                Outcome::Victory => ("COLONY TRIUMPHANT", GOOD),
+                Outcome::Retired => ("RETIRED", ACCENT),
+                Outcome::Lost => ("SHIP LOST", CRIT),
+            };
+            ui.label(RichText::new(head).size(52.0).strong().color(col));
             ui.add_space(6.0);
             ui.label(RichText::new(&over.cause).size(22.0).color(TEXT));
             ui.label(RichText::new(&over.detail).size(16.0).color(DIM));
@@ -242,6 +371,33 @@ pub fn game_over(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>
                         ui.end_row();
                     }
                 });
+            });
+            ui.add_space(10.0);
+            let card = sim.score();
+            card_frame().show(ui, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(RichText::new("SCORE").strong().color(ACCENT));
+                egui::Grid::new("score").num_columns(3).spacing([20.0, 2.0]).show(ui, |ui| {
+                    for (k, v, pts) in &card.lines {
+                        if *pts <= 0.0 {
+                            continue;
+                        }
+                        ui.label(dim(*k));
+                        ui.label(v);
+                        ui.label(format!("{:.0}", pts));
+                        ui.end_row();
+                    }
+                    ui.label(dim(format!("Outcome: {}", card.outcome.name())));
+                    ui.label("");
+                    ui.label(format!("×{}", card.outcome.mult()));
+                    ui.end_row();
+                });
+                ui.label(RichText::new(format!("Final score {}", super::colony::fmt_pop(card.total as f64))).size(22.0).strong().color(KEY));
+                match app.last_rank {
+                    Some(r) => ui.label(RichText::new(format!("#{r} on the scoreboard")).color(GOOD)),
+                    None if sim.scored => ui.label(dim("Not in the top 100 this time.")),
+                    None => ui.label(dim("")),
+                };
             });
             ui.add_space(16.0);
             if ui.add(egui::Button::new(RichText::new("Return to title  [Enter]").size(17.0)).min_size(vec2(220.0, 38.0))).clicked() {

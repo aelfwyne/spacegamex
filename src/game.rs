@@ -6,6 +6,8 @@
 //! front end shares the same shortcuts. That split is what keeps a future
 //! port (another toolkit, another OS) to the drawing code alone.
 
+use crate::sim::background::Captain;
+use crate::sim::colony::law::Law;
 use crate::sim::civ::CivTier;
 use crate::sim::galaxy::Neighbor;
 use crate::sim::save;
@@ -28,12 +30,16 @@ pub enum Screen {
     GameOver,
     /// The colony reached a million.
     Victory,
+    /// Career statistics (in game).
+    Stats,
+    /// The scoreboard (from the title).
+    Scores,
 }
 
 impl Screen {
     /// Screens that show the running game (and so need a sim).
     pub fn in_game(self) -> bool {
-        !matches!(self, Screen::Title | Screen::GameOver | Screen::Help | Screen::Victory)
+        !matches!(self, Screen::Title | Screen::GameOver | Screen::Help | Screen::Victory | Screen::Scores)
     }
 }
 
@@ -55,6 +61,7 @@ pub enum ColonyTab {
     Census,
     Family,
     Market,
+    Laws,
 }
 
 /// Time-compression steps, in the order `F` cycles through them (0 = pause).
@@ -83,7 +90,12 @@ pub enum Action {
     SetSeed(u64),
     SetOpts(crate::sim::GalaxyOpts),
     SetSex(Sex),
+    SetBackground(crate::sim::Background),
+    /// Open the captain popup.
     NewGame,
+    CancelCaptain,
+    /// Start a new game with this captain.
+    StartGame(Captain),
     Continue,
     // ---- navigation ----
     Open(Screen),
@@ -180,8 +192,12 @@ pub enum Action {
     SellRelic(usize),
     // ---- pirates ----
     Encounter(crate::sim::combat::Choice),
+    EnactLaw(Law),
+    RepealLaw(Law),
     // ---- misc ----
     Save,
+    /// End the game by retiring (asks twice).
+    Retire,
 }
 
 /// One line of the status history. `level` is `None` for UI flashes (no
@@ -221,6 +237,14 @@ pub struct App {
     last_colony_save: f64,
     /// Founding asks twice.
     pub confirm_found: bool,
+    /// Retiring asks twice.
+    pub confirm_retire: bool,
+    /// The captain popup is open (title).
+    pub captain_open: bool,
+    /// The background picked in the captain popup.
+    pub title_background: crate::sim::Background,
+    /// This game's place on the scoreboard, once recorded.
+    pub last_rank: Option<usize>,
     /// Jobs on offer at the current port (refreshed when trade opens).
     pub board: Vec<crate::sim::quest::Quest>,
     /// (msg, expiry on the real clock)
@@ -258,6 +282,10 @@ impl App {
             person: None,
             last_colony_save: 0.0,
             confirm_found: false,
+            confirm_retire: false,
+            captain_open: false,
+            title_background: Default::default(),
+            last_rank: None,
             board: vec![],
             flash: None,
             flash_history: Vec::new(),
@@ -321,12 +349,27 @@ impl App {
         self.log_seen = total;
     }
 
+    /// Random given name and surname for the captain popup.
+    pub fn random_names(&self, salt: u64) -> (String, String) {
+        let mut rng = crate::rngx::derive(self.gal.seed ^ salt, 0xca_97a1);
+        (crate::rngx::name(&mut rng), crate::rngx::name(&mut rng))
+    }
+
+    /// New game with a random captain (tests, previews).
     pub fn start_new_game(&mut self, ship_idx: usize) {
+        let (given, surname) = self.random_names(0);
+        self.start_with_captain(ship_idx, Captain { given, surname, sex: self.title_sex, background: self.title_background });
+    }
+
+    pub fn start_with_captain(&mut self, ship_idx: usize, captain: Captain) {
         let seed = self.gal.seed;
         self.gal = Galaxy::with_opts(seed, self.gal.opts);
         let mut sim = Sim::new_game(seed, ship_idx, &mut self.gal);
-        sim.player_sex = self.title_sex;
+        sim.apply_captain(&captain);
         self.sim = Some(sim);
+        self.captain_open = false;
+        self.confirm_retire = false;
+        self.last_rank = None;
         self.screen = Screen::Cockpit;
         self.sel_planet = 0;
         self.flash_history.clear();
@@ -345,7 +388,10 @@ impl App {
                 self.sim = Some(sim);
                 self.gal = gal;
                 self.sel_planet = 0;
+                self.last_rank = None;
+                self.confirm_retire = false;
                 self.screen = if over { Screen::GameOver } else { Screen::Cockpit };
+                self.record_score();
                 self.flash("Save loaded.");
             }
             Err(e) => self.flash(e),
@@ -485,7 +531,32 @@ impl App {
     // Actions
     // ------------------------------------------------------------------
 
+    /// Fold a change in credits into the earned/spent statistics.
+    fn track_credits(&mut self, before: Option<(u64, f64)>) {
+        let (Some((seed, c0)), Some(sim)) = (before, self.sim.as_mut()) else { return };
+        // A different game started in between: nothing to compare.
+        if sim.seed != seed {
+            return;
+        }
+        let d = sim.credits - c0;
+        if d > 0.0 {
+            sim.stats.credits_earned += d;
+        } else if d < 0.0 {
+            sim.stats.credits_spent -= d;
+        }
+    }
+
+    fn credits_now(&self) -> Option<(u64, f64)> {
+        self.sim.as_ref().map(|s| (s.seed, s.credits))
+    }
+
     pub fn apply(&mut self, a: Action) {
+        let before = if matches!(a, Action::StartGame(_) | Action::Continue | Action::NewGame | Action::AckGameOver) { None } else { self.credits_now() };
+        self.apply_inner(a);
+        self.track_credits(before);
+    }
+
+    fn apply_inner(&mut self, a: Action) {
         // In-game actions need a live sim; ignore them otherwise (they can
         // only arrive from a stale key press during a screen change).
         let needs_sim = !matches!(
@@ -494,8 +565,12 @@ impl App {
                 | Action::SetSeed(_)
                 | Action::SetOpts(_)
                 | Action::SetSex(_)
+                | Action::SetBackground(_)
                 | Action::NewGame
+                | Action::CancelCaptain
+                | Action::StartGame(_)
                 | Action::Continue
+                | Action::Open(Screen::Scores)
                 | Action::Open(Screen::Help)
                 | Action::Open(Screen::Title)
                 | Action::Back
@@ -510,7 +585,18 @@ impl App {
             Action::SetSeed(s) => self.gal = Galaxy::with_opts(s, self.gal.opts),
             Action::SetOpts(o) => self.gal = Galaxy::with_opts(self.gal.seed, o),
             Action::SetSex(x) => self.title_sex = x,
-            Action::NewGame => self.start_new_game(self.title_sel),
+            Action::SetBackground(b) => self.title_background = b,
+            Action::NewGame => self.captain_open = true,
+            Action::CancelCaptain => self.captain_open = false,
+            Action::StartGame(c) => {
+                if c.given.trim().is_empty() || c.surname.trim().is_empty() {
+                    self.flash("Your captain needs a name and a surname.");
+                } else {
+                    self.title_sex = c.sex;
+                    self.title_background = c.background;
+                    self.start_with_captain(self.title_sel, c);
+                }
+            }
             Action::Continue => self.continue_game(),
             Action::Open(s) => self.open(s),
             Action::Back => self.back(),
@@ -585,9 +671,9 @@ impl App {
                 self.sel_moon = None;
             }
             Action::SelectBody(l) => match l {
-                Loc::Planet(i) => self.apply(Action::SelectPlanet(i)),
+                Loc::Planet(i) => self.apply_inner(Action::SelectPlanet(i)),
                 Loc::Moon(i, m) => {
-                    self.apply(Action::SelectPlanet(i));
+                    self.apply_inner(Action::SelectPlanet(i));
                     self.sel_moon = Some(m);
                 }
                 _ => {}
@@ -805,7 +891,7 @@ impl App {
                 if t == ColonyTab::Family && self.person.is_none() {
                     let me = self.sim().colony.as_ref().map(|c| c.player);
                     if let Some(id) = me {
-                        self.apply(Action::ViewPerson(id));
+                        self.apply_inner(Action::ViewPerson(id));
                     }
                 }
             }
@@ -824,7 +910,7 @@ impl App {
                 let now = crate::sim::people::years(sim.t);
                 let found = sim.colony.as_mut().and_then(|c| if a == Action::RandomParent { c.census.random_parent(now) } else { c.census.oldest(now) });
                 match found {
-                    Some(id) => self.apply(Action::ViewPerson(id)),
+                    Some(id) => self.apply_inner(Action::ViewPerson(id)),
                     None => self.flash("Nobody fits."),
                 }
             }
@@ -838,6 +924,7 @@ impl App {
                     t: sim.t,
                 });
                 save::delete();
+                self.record_score();
                 self.screen = Screen::GameOver;
             }
             Action::VictoryAbandon => {
@@ -855,8 +942,40 @@ impl App {
             Action::Save => {
                 self.do_save();
             }
+            Action::EnactLaw(l) => {
+                if let Err(e) = self.sim.as_mut().unwrap().enact_law(l) {
+                    self.flash(e);
+                }
+            }
+            Action::RepealLaw(l) => {
+                if let Err(e) = self.sim.as_mut().unwrap().repeal_law(l) {
+                    self.flash(e);
+                }
+            }
+            Action::Retire => {
+                if !self.confirm_retire {
+                    self.confirm_retire = true;
+                    self.flash("Retiring ends the game: press Retire again to confirm.");
+                } else {
+                    self.confirm_retire = false;
+                    self.sim.as_mut().unwrap().retire_now();
+                    save::delete();
+                    self.record_score();
+                    self.screen = Screen::GameOver;
+                }
+            }
         }
         self.drain_log();
+    }
+
+    /// Put a finished game on the scoreboard (once).
+    pub fn record_score(&mut self) {
+        let Some(sim) = self.sim.as_mut() else { return };
+        if sim.over.is_none() || sim.scored {
+            return;
+        }
+        sim.scored = true;
+        self.last_rank = crate::sim::score::record(sim.score_entry());
     }
 
     pub fn refresh_board(&mut self) {
@@ -926,6 +1045,7 @@ impl App {
             }
             Screen::Title => self.screen = Screen::Title,
             Screen::GameOver | Screen::Victory => {}
+            Screen::Scores => self.screen = Screen::Scores,
             Screen::Colony => {
                 if self.sim().colony.is_some() {
                     self.screen = Screen::Colony;
@@ -962,6 +1082,7 @@ impl App {
                 if r.in_game() && self.sim.is_none() { Screen::Title } else { r }
             }
             Screen::Title | Screen::GameOver | Screen::Victory => self.screen,
+            Screen::Scores => Screen::Title,
             _ => {
                 if self.sim.is_some() { Screen::Cockpit } else { Screen::Title }
             }
@@ -1004,8 +1125,12 @@ impl App {
                 Key::Char(c @ '1'..='3') => Some(Action::SelectShip(c as usize - '1' as usize)),
                 Key::Left | Key::Up => Some(Action::SelectShip((self.title_sel + 2) % 3)),
                 Key::Right | Key::Down => Some(Action::SelectShip((self.title_sel + 1) % 3)),
+                Key::Esc if self.captain_open => Some(Action::CancelCaptain),
+                // The popup has its own buttons and text fields.
+                _ if self.captain_open => None,
                 Key::Enter => Some(Action::NewGame),
                 Key::Char('c') => Some(Action::Continue),
+                Key::Char('s') => Some(Action::Open(Screen::Scores)),
                 Key::Char('h') => Some(Action::Open(Screen::Help)),
                 Key::Char('q') => Some(Action::Quit),
                 _ => None,
@@ -1015,6 +1140,14 @@ impl App {
                 _ => None,
             },
             Screen::Victory => None,
+            Screen::Scores => match k {
+                Key::Esc | Key::Enter | Key::Char('s') => Some(Action::Back),
+                _ => None,
+            },
+            Screen::Stats => match k {
+                Key::Esc | Key::Char('l') => Some(Action::Back),
+                _ => self.global_key(k),
+            },
             Screen::Colony => match k {
                 Key::Esc | Key::Char('o') => Some(Action::Back),
                 _ => self.global_key(k),
@@ -1121,6 +1254,7 @@ impl App {
             Key::Char('r') => Action::Open(Screen::Resources),
             Key::Char('k') => Action::Open(Screen::Trade),
             Key::Char('o') => Action::Open(Screen::Colony),
+            Key::Char('l') => Action::Open(Screen::Stats),
             Key::Char('f') => Action::CycleTimeScale,
             Key::Char('x') => Action::SkipToArrival,
             Key::Char('v') => Action::ToggleSalvage,
@@ -1139,6 +1273,12 @@ impl App {
     /// Advance the game by `dt_real` seconds of wall-clock time (scaled by
     /// the time-compression setting); autosave hourly (game time).
     pub fn tick(&mut self, dt_real: f64) {
+        let before = self.credits_now();
+        self.tick_inner(dt_real);
+        self.track_credits(before);
+    }
+
+    fn tick_inner(&mut self, dt_real: f64) {
         // Clamp: a stalled frame (window hidden, debugger) must not fast-
         // forward the ship by minutes in one step.
         let dt = dt_real.clamp(0.0, 0.5);
@@ -1163,6 +1303,11 @@ impl App {
             if sim.colony.as_ref().is_some_and(|c| c.won) && !sim.victory_seen {
                 self.screen = Screen::Victory;
             }
+            if sim.over.is_some() {
+                save::delete();
+                self.screen = Screen::GameOver;
+                self.record_score();
+            }
             self.drain_log();
             return;
         }
@@ -1183,6 +1328,7 @@ impl App {
         if sim.over.is_some() {
             save::delete();
             self.screen = Screen::GameOver;
+            self.record_score();
         }
         self.drain_log();
     }

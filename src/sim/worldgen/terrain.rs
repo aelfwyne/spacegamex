@@ -12,7 +12,7 @@
 
 use super::dice;
 use crate::sim::planet::{AtmoKind, Geosphere, TempBand};
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 
 pub const WATER: u8 = 1;
 pub const BIO: u8 = 2;
@@ -266,7 +266,7 @@ pub fn allowed(ctx: &Ctx, e: &Entry, allow_bio: bool) -> bool {
 }
 
 /// Distinctive features for a non-frozen world.
-pub fn pick_features(rng: &mut StdRng, ctx: &Ctx, count: usize, allow_bio: bool) -> Vec<String> {
+pub fn pick_features(rng: &mut GameRng, ctx: &Ctx, count: usize, allow_bio: bool) -> Vec<String> {
     let mut chosen: Vec<&'static str> = Vec::new();
     let mut has_moon = false;
     for _ in 0..count {
@@ -293,7 +293,7 @@ pub fn pick_features(rng: &mut StdRng, ctx: &Ctx, count: usize, allow_bio: bool)
 }
 
 /// One replacement feature, avoiding what the body already has.
-pub fn pick_replacement(rng: &mut StdRng, ctx: &Ctx, existing: &[String], allow_bio: bool) -> String {
+pub fn pick_replacement(rng: &mut GameRng, ctx: &Ctx, existing: &[String], allow_bio: bool) -> String {
     let cands: Vec<(&'static str, f64)> = CATALOG
         .iter()
         .filter(|e| !existing.iter().any(|x| x == e.name) && e.tags & MOON == 0 && allowed(ctx, e, allow_bio))
@@ -306,16 +306,16 @@ pub fn pick_replacement(rng: &mut StdRng, ctx: &Ctx, existing: &[String], allow_
     }
 }
 
-pub fn ice_features(rng: &mut StdRng, count: usize) -> Vec<String> {
+pub fn ice_features(rng: &mut GameRng, count: usize) -> Vec<String> {
     dice::distinct(rng, ICE_CATALOG, count).into_iter().map(String::from).collect()
 }
 
 /// The big picture of a world's geography. `ice_world` = Ice Planet.
-pub fn surface_layout(rng: &mut StdRng, ctx: &Ctx, ice_world: bool) -> String {
+pub fn surface_layout(rng: &mut GameRng, ctx: &Ctx, ice_world: bool) -> String {
     if ctx.is_moon {
         return String::new();
     }
-    let pick = |rng: &mut StdRng, v: &[&str]| dice::pick(rng, v).to_string();
+    let pick = |rng: &mut GameRng, v: &[&str]| dice::pick(rng, v).to_string();
     if ice_world {
         return pick(rng, &[
             "Ice shell over a deep subsurface ocean",

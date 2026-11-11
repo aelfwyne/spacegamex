@@ -12,7 +12,7 @@ use eframe::egui::{self, vec2, Align2, Color32, FontId, RichText, Sense, Stroke,
 pub fn draw(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     let sim = app.sim();
     let Some(trip) = sim.trip.as_ref() else { return };
-    let spec = sim.ship();
+    let spec = &sim.ship();
     let tele_h = 120.0;
     let size = vec2(ui.available_width(), (ui.available_height() - tele_h).max(120.0));
     let (resp, painter) = ui.allocate_painter(size, Sense::hover());

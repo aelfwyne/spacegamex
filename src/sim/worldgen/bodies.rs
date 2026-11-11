@@ -7,7 +7,7 @@ use super::terrain::{self, Ctx};
 use crate::sim::planet::{
     AtmoKind, BeltFeature, Colony, GgFeature, Geosphere, Host, LifeType, NativeSociety, Salvage, TempBand,
 };
-use rand::rngs::StdRng;
+use crate::rngx::GameRng;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -142,7 +142,7 @@ pub fn band_of(orbit: f64) -> TempBand {
     }
 }
 
-fn roll_size(rng: &mut StdRng, b: &mut Proto) {
+fn roll_size(rng: &mut GameRng, b: &mut Proto) {
     let roll = r2d6(rng) + b.mods.size;
     let (km, g) = match roll {
         r if r <= 2 => (1_000.0, 0.02),
@@ -167,7 +167,7 @@ fn roll_size(rng: &mut StdRng, b: &mut Proto) {
     b.size_roll = roll;
 }
 
-fn roll_atmosphere(rng: &mut StdRng, b: &mut Proto) {
+fn roll_atmosphere(rng: &mut GameRng, b: &mut Proto) {
     let roll = r2d6(rng) + b.mods.atmo;
     let a = if roll <= 3 {
         b.mods.temp -= 4;
@@ -193,7 +193,7 @@ fn roll_atmosphere(rng: &mut StdRng, b: &mut Proto) {
     b.atmo = Some(a);
 }
 
-fn roll_temperature(rng: &mut StdRng, b: &mut Proto, forced: Option<i32>) {
+fn roll_temperature(rng: &mut GameRng, b: &mut Proto, forced: Option<i32>) {
     let roll = forced.unwrap_or_else(|| r2d6(rng) + b.mods.temp);
     let (band, base) = if roll <= 3 {
         b.mods.geo -= 2;
@@ -215,7 +215,7 @@ fn roll_temperature(rng: &mut StdRng, b: &mut Proto, forced: Option<i32>) {
     b.orbit = base + below(rng, 2000) as f64;
 }
 
-fn roll_geosphere(rng: &mut StdRng, b: &mut Proto) {
+fn roll_geosphere(rng: &mut GameRng, b: &mut Proto) {
     let roll = r2d6(rng) + b.mods.geo;
     let g = if roll <= 4 {
         b.mods.terrain -= 3;
@@ -237,7 +237,7 @@ fn roll_geosphere(rng: &mut StdRng, b: &mut Proto) {
     b.geo = Some(g);
 }
 
-fn roll_terrain(rng: &mut StdRng, b: &mut Proto) {
+fn roll_terrain(rng: &mut GameRng, b: &mut Proto) {
     let ctx = b.ctx();
     let count = terrain::feature_count(&ctx);
     b.terrain = if b.temp == TempBand::Frozen {
@@ -248,7 +248,7 @@ fn roll_terrain(rng: &mut StdRng, b: &mut Proto) {
     b.surface = terrain::surface_layout(rng, &ctx, false);
 }
 
-fn roll_ice_terrain(rng: &mut StdRng, b: &mut Proto) {
+fn roll_ice_terrain(rng: &mut GameRng, b: &mut Proto) {
     let ctx = b.ctx();
     let count = terrain::feature_count(&ctx);
     b.terrain = terrain::ice_features(rng, count);
@@ -256,7 +256,7 @@ fn roll_ice_terrain(rng: &mut StdRng, b: &mut Proto) {
 }
 
 /// Natural rings and moons (port of `rollAlienNaturalOrbit_`).
-fn roll_natural_orbit(rng: &mut StdRng, b: &mut Proto) {
+fn roll_natural_orbit(rng: &mut GameRng, b: &mut Proto) {
     let roll = r2d6(rng);
     match roll {
         5 => b.ring = true,
@@ -275,7 +275,7 @@ fn roll_natural_orbit(rng: &mut StdRng, b: &mut Proto) {
 
 /// All bodies for one star (port of `buildAlienStarPlanets_`), plus the
 /// gas giants' moon systems (`addGasGiantMoonSystems_`).
-pub fn star_bodies(rng: &mut StdRng, mods: &Mods) -> Vec<Proto> {
+pub fn star_bodies(rng: &mut GameRng, mods: &Mods) -> Vec<Proto> {
     let mut bodies = Vec::new();
 
     let gas = (d6(rng) - 1 + mods.jovian).max(0);
