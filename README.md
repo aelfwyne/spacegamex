@@ -438,7 +438,9 @@ Save format 3 (since v0.3.0) uses the detailed world generator, so every
 galaxy changed shape: saves from v0.2.0 and earlier cannot be continued (the
 title screen says so) and start a new game instead. v0.3.0 and v0.4.0 saves
 load in v0.5.0 (with the default galaxy options, an empty hold and a male
-captain).
+captain). v0.6.0 replaced the random number generator, so every galaxy has
+a new shape: older saves still load, but the galaxy around them
+regenerates differently, so start a new game. See `CHANGELOG.md`.
 
 ## Building on Windows (future)
 
