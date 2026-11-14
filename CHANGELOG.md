@@ -59,7 +59,7 @@
 ### Windows
 - First Windows build: a zip with `colonia-galactica.exe` (icon embedded,
   no console window) and the simulator. Unzip and run; saves go to
-  `%APPDATA%\\colonia-galactica`. Built from Linux with `./build-windows.sh`.
+  `%APPDATA%\colonia-galactica`. Built from Linux with `./build-windows.sh`.
 
 0.6.0 saves load.
 
