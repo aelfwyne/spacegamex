@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.7.0 — 2026-11-13
+
+### Ships and the fleet
+- **Shipyards sell ships:** every interstellar (T3) port sells the Company
+  ship, and each stocks its own selection of six new hulls: the
+  Interceptor *Kestrel* and Gunship *Sentinel*, the Heavy Frigate *Aegis*,
+  the Fast Packet *Swallow*, and the Bulk Freighter *Ox* and
+  Super-Freighter *Atlas*.
+- **Trade in** the old ship against the price (40% of list, by condition),
+  or pay in full and have the new one ferried to your colony's **fleet**.
+- Switch between laid-up ships when docked at the colony. Each ship keeps
+  its own stores, cargo, hull, crew and fittings; only the captain, their
+  partner and their pilot change ships. Break up a laid-up ship for the
+  colony's materials.
+
+### Colony
+- **Shipyard** (space dock, Business Center and 250,000 colonists): builds
+  the three founding designs from the stockpile, and any other design once
+  you buy its blueprints (half its price). Three slips.
+- An **ark** built at the shipyard takes 500 of the colony's people as
+  settlers, with a share of the royal line if it lives there (never your
+  heirs). The census remembers who left, and when.
+- **Hegemony** law: found more colonies, buy colony arks at any T3 yard,
+  and at a million continue the Royal Lineage. Costs a little happiness and
+  wealth.
+- **Space dock:** purchases can go into the docked ship's hold instead of
+  the colony, to fill an ark or carry supplies elsewhere. The dock restocks
+  over the weeks like any port (it used to reroll once a year, so a bought-
+  out dock stayed empty). Each manufacturing plant keeps supplies for 1,000
+  more colonists on sale there, made from the stockpile and sold for less.
+- Quest deliveries, after Attack and Defense, now award drone refits you
+  can't buy: ship drone yield and colony Resource Drones capacity, +10% a
+  time up to +50% each.
+
+### Star map
+- **Visited** tab: every system you have been to, at any range.
+- **Target** a system (◎ in the list, double-click, or the *Target* button):
+  a green edge arrow, crosshair marker and side-panel line point the way,
+  like the colony arrow. The target is saved with the game.
+
+### The fab
+- **Fab focus works.** Every focus first makes what is being consumed.
+  Then *Life support* fills water, O2 and food in full, *Repair* fills MAT,
+  *Medical* fills medicine, and *Stockpile* tops every tank up evenly from
+  the mining surplus. (Before, every focus but Idle did the same thing.)
+- Water is made first, for what the oxygen, food and medicine lines will
+  actually draw. The food refill used to drink the water tank dry while
+  ice piled up unused.
+
+### Fixes
+- The ark's reactor is 800 MW (was 700): it could not power its own
+  in-system load. Fuel per MW is unchanged.
+- Autopilot: with an ore critical, the star and the planet used different
+  fuel lines, so an ark at 70% H2 shuttled between them every 0.4 h, never
+  mining or refuelling, until the crew died.
+
+0.6.0 saves load.
+
 ## 0.6.0 — 2026-11-10
 
 ### Captains
