@@ -29,3 +29,8 @@ serde_json = "1.0.154"
 [profile.dev.package."*"]
 # egui is slow unoptimised; keep our own crate debuggable.
 opt-level = 2
+
+[build-dependencies]
+# Windows .exe icon + version info (used only when the target is Windows).
+ico = "0.6.0"
+winresource = "0.1.34"

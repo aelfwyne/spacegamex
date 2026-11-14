@@ -56,6 +56,11 @@
   fuel lines, so an ark at 70% H2 shuttled between them every 0.4 h, never
   mining or refuelling, until the crew died.
 
+### Windows
+- First Windows build: a zip with `colonia-galactica.exe` (icon embedded,
+  no console window) and the simulator. Unzip and run; saves go to
+  `%APPDATA%\\colonia-galactica`. Built from Linux with `./build-windows.sh`.
+
 0.6.0 saves load.
 
 ## 0.6.0 — 2026-11-10

@@ -445,22 +445,30 @@ captain). v0.6.0 replaced the random number generator, so every galaxy has
 a new shape: older saves still load, but the galaxy around them
 regenerates differently, so start a new game. See `CHANGELOG.md`.
 
-## Building on Windows (future)
+## Building for Windows
 
-Nothing in the code is Linux-specific; the Windows path is meant to be a
-build step, not a port:
+Nothing in the code is Linux-specific. eframe uses Direct3D 12 / Vulkan on
+Windows via wgpu, saves go to `%APPDATA%` (the `directories` crate), and the
+game is a GUI-subsystem app in release mode (no console window), while
+`colonia-galactica-sim` stays a console tool. `build.rs` embeds the .exe icon
+(from `assets/icon.png`) and version info whenever the target is Windows.
 
-- `cargo build --release` on a Windows machine with the MSVC Rust toolchain
-  (`rustup default stable-x86_64-pc-windows-msvc`) produces
-  `target\release\colonia-galactica.exe` and `colonia-galactica-sim.exe`. eframe uses
-  Direct3D 12 / Vulkan there via wgpu; no extra SDKs are needed.
-- The game binary is built as a GUI-subsystem app in release mode (no
-  console window); `colonia-galactica-sim` stays a console tool.
-- Saves go to `%APPDATA%` automatically (the `directories` crate).
-- Still to add when shipping on Windows: an `.exe` icon resource (e.g. via
-  the `winres` crate in a `build.rs` gated on `cfg(windows)`), and an
-  installer or `install.ps1` that creates a Start-menu shortcut. The window
-  icon already works on every platform (it is embedded from `assets/icon.png`).
+**Cross-compile from Linux** (Ubuntu/Debian):
+
+```sh
+sudo apt install mingw-w64              # one time
+rustup target add x86_64-pc-windows-gnu # one time
+./build-windows.sh
+```
+
+This produces `dist/colonia-galactica-<version>-windows-x64.zip` with both
+.exe files plus README and CHANGELOG. Players unzip it anywhere and run
+`colonia-galactica.exe`; there is no installer yet.
+
+**Native build on Windows**: with the MSVC Rust toolchain,
+`cargo build --release` produces `target\release\colonia-galactica.exe`
+and `colonia-galactica-sim.exe` (the icon is embedded via `rc.exe` from the
+Windows SDK, which the MSVC build tools install).
 
 ## Layout
 
