@@ -60,6 +60,9 @@ pub struct Stats {
     pub colony_peak: f64,
     pub buildings: u32,
     pub laws_enacted: u32,
+    // ---- ships ----
+    pub ships_bought: u32,
+    pub ships_built: u32,
     // ---- discoveries ----
     /// Records by name ("Hottest world" …).
     pub extremes: BTreeMap<String, Extreme>,

@@ -22,6 +22,9 @@ use std::collections::BTreeMap;
 pub const O2_PER_P_H: f64 = 0.15;
 pub const WATER_PER_P_H: f64 = 0.5;
 pub const FOOD_PER_P_H: f64 = 0.35;
+/// O2, water and food must each be above this share of the tank for
+/// morale to rise.
+pub const MORALE_LINE: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Focus {
@@ -133,7 +136,7 @@ pub fn loc_label(loc: Loc, sys: &StarSystem) -> String {
 pub enum ShuttleBlock {
     /// The ship is in FTL transit between stars.
     Tripping,
-    /// The ship is mid-leg on another in-system shuttle.
+    /// The ship is already flying to that very place.
     Shuttling,
     /// The ship is already docked where it was asked to go.
     AlreadyThere,
@@ -146,6 +149,31 @@ pub struct Move {
     pub to: Loc,
     pub remaining_h: f64,
     pub total_h: f64,
+    /// Legs abandoned mid-flight by a change of course, oldest first: each
+    /// is (where it was heading, share of it flown). The leg in hand starts
+    /// from the point they lead to, out from `Sim::loc`.
+    #[serde(default)]
+    pub path: Vec<(Loc, f64)>,
+}
+
+impl Move {
+    /// Share of this leg flown (0..1).
+    pub fn progress(&self) -> f64 {
+        (1.0 - self.remaining_h / self.total_h.max(1e-9)).clamp(0.0, 1.0)
+    }
+
+    /// Where a leg that set out from `from` and changed course along
+    /// `path` began, in any linear coordinate (`pos` maps a place to it).
+    pub fn start_point<P>(&self, from: P, pos: impl Fn(Loc) -> P) -> P
+    where
+        P: Copy + std::ops::Add<Output = P> + std::ops::Sub<Output = P> + std::ops::Mul<f64, Output = P>,
+    {
+        let mut p = from;
+        for &(to, f) in &self.path {
+            p = p + (pos(to) - p) * f;
+        }
+        p
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +287,10 @@ pub struct Sim {
     pub log: Log,
     pub over: Option<GameOver>,
     pub visited: Vec<u64>,
+    /// A system tagged on the star map as a navigation target: the chart
+    /// points the way to it, like it does to your colony.
+    #[serde(default)]
+    pub waypoint: Option<u64>,
     pub autosave_h: f64,
     pub warned: BTreeMap<String, f64>,
     pub last_brownout: bool,
@@ -328,6 +360,9 @@ pub struct Sim {
     pub attack_lvl: u8,
     #[serde(default)]
     pub defense_lvl: u8,
+    /// Mining-drone refits from quest rewards: +10% drone yield each.
+    #[serde(default)]
+    pub drone_lvl: u8,
     #[serde(default)]
     pub battles_won: u32,
     #[serde(default)]
@@ -366,6 +401,21 @@ pub struct Sim {
     /// This game's score is on the scoreboard.
     #[serde(default)]
     pub scored: bool,
+    /// Ships laid up at the colony, each with its own stores and cargo.
+    #[serde(default)]
+    pub fleet: Vec<super::shipyard::Berthed>,
+    /// New Ship Morale Boost: stores (O2, water, food) that have not yet
+    /// reached the morale line since this ship was new. Until one does,
+    /// its being low does not hurt morale.
+    #[serde(default)]
+    pub new_ship_boost: Vec<Res>,
+    /// Further colonies founded under Hegemony (settlers only).
+    #[serde(default)]
+    pub outposts: Vec<super::colony::PlayerColony>,
+    /// Who the passengers are, when an ark carries emigrants from one of
+    /// your colonies (the first `pax.count` of them are still alive).
+    #[serde(default)]
+    pub settlers: Vec<super::colony::census::Emigrant>,
 }
 
 fn poisson(rng: &mut GameRng, lambda: f64) -> u32 {
@@ -661,6 +711,7 @@ impl Sim {
     pub fn ship(&self) -> ShipSpec {
         let mut s = *ShipSpec::spec(self.ship_idx);
         self.background.apply(&mut s);
+        s.drone_yield *= 1.0 + 0.1 * self.drone_lvl as f64;
         s
     }
 
@@ -903,6 +954,7 @@ impl Sim {
             log: Log::default(),
             over: None,
             visited: vec![home],
+            waypoint: None,
             autosave_h: 0.0,
             warned: BTreeMap::new(),
             last_brownout: false,
@@ -922,6 +974,7 @@ impl Sim {
             hold: Hold::default(),
             attack_lvl: 0,
             defense_lvl: 0,
+            drone_lvl: 0,
             battles_won: 0,
             battles_lost: 0,
             pending_bounty: 0.0,
@@ -938,6 +991,10 @@ impl Sim {
             surname: String::new(),
             background: Default::default(),
             scored: false,
+            fleet: vec![],
+            new_ship_boost: super::shipyard::new_ship_boost(),
+            outposts: vec![],
+            settlers: vec![],
         };
         // The captain's age and retirement: their own stream, so adding
         // them changed nothing else about a seed.
@@ -1191,8 +1248,53 @@ impl Sim {
         if taken < fuel * 0.5 {
             self.log.push(self.t, Level::Warn, "Shuttle fuel low — burning reserves.");
         }
-        self.shuttle = Some(Move { to, remaining_h: t_h, total_h: t_h });
+        self.shuttle = Some(Move { to, remaining_h: t_h, total_h: t_h, path: vec![] });
         self.log.push(self.t, Level::Info, format!("Shuttling to {} — {:.1} h.", loc_label(to, sys), t_h));
+        Ok(())
+    }
+
+    /// Where the ship is on the system's radial line right now (AU).
+    pub fn shuttle_pos_au(&self, sys: &StarSystem) -> f64 {
+        let here = sys.pos_au(self.loc);
+        let Some(mv) = &self.shuttle else { return here };
+        let start = mv.start_point(here, |l| sys.pos_au(l));
+        start + (sys.pos_au(mv.to) - start) * mv.progress()
+    }
+
+    /// Change course mid-shuttle: fly from where the ship is now to `to`
+    /// (back to where it set out from, to turn around). Fuel and time are
+    /// for the new leg only; what was burnt on the old one is spent.
+    pub fn redirect_shuttle(&mut self, gal: &mut Galaxy, to: Loc) -> Result<(), ShuttleBlock> {
+        if self.trip.is_some() {
+            return Err(ShuttleBlock::Tripping);
+        }
+        let Some(leg) = self.shuttle.clone() else { return self.begin_shuttle(gal, to) };
+        if leg.to == to {
+            return Err(ShuttleBlock::Shuttling);
+        }
+        let spec = self.ship();
+        let sys = gal.system_ref(self.sys_id);
+        let exists = match to {
+            Loc::Star => true,
+            Loc::Companion => sys.companion_dockable(),
+            _ => sys.site(to).is_some(),
+        };
+        if !exists {
+            return Err(ShuttleBlock::Nowhere);
+        }
+        let now_au = self.shuttle_pos_au(sys);
+        let dist_au = (now_au - sys.pos_au(to)).abs();
+        let t_h = 0.25 + dist_au * spec.move_time_per_au;
+        let fuel = dist_au * spec.move_fuel_per_au;
+        let taken = self.inv.take(Res::H2, fuel);
+        if taken < fuel * 0.5 {
+            self.log.push(self.t, Level::Warn, "Shuttle fuel low — burning reserves.");
+        }
+        let mut path = leg.path.clone();
+        path.push((leg.to, leg.progress()));
+        let what = if to == self.loc { "Turning back to" } else { "Course changed for" };
+        self.log.push(self.t, Level::Info, format!("{what} {} — {:.1} h.", loc_label(to, sys), t_h));
+        self.shuttle = Some(Move { to, remaining_h: t_h, total_h: t_h, path });
         Ok(())
     }
 
@@ -1324,6 +1426,10 @@ impl Sim {
         }
         let hull_before = self.hull;
         self.advance_ship(dt_h, gal);
+        // The local port's suppliers keep bringing stock in.
+        if self.trip.is_none() {
+            gal.system(self.sys_id).restock_cargo_market(self.seed, self.t);
+        }
         // Shield artifacts soak a share of every hull hit.
         if self.hull < hull_before && !self.artifacts.is_empty() {
             self.hull = hull_before - (hull_before - self.hull) * self.artifact_shield();
@@ -1723,14 +1829,13 @@ impl Sim {
                 .is_some_and(|p| p.mineable() && p.deposits.iter().any(|d| d.res == Res::Ice && d.tons >= 1.0));
         if self.focus != Focus::Idle && brownout > 0.05 {
             let morale_eff = 0.75 + 0.25 * (self.crew.morale.min(100.0) / 100.0);
-            // Every non-Idle focus runs the full recipe list in priority
-            // order: life support first (the crew dies otherwise), then hull
-            // material, then medicine. Exclusive focus (Medical => medicine
-            // only) deadlock: a tank hovering at its focus threshold would
-            // flip the fab in and out of that mode forever, so nothing but
-            // one product was ever made and the departure buffers never
-            // filled. The want_h caps already encode urgency, so priority
-            // order with caps is both safe and complete.
+            // Every non-Idle focus makes what is being consumed on every
+            // line first (the crew dies otherwise); the focus then decides
+            // whose buffers fill first, and in full (see `focus_lines`).
+            // Exclusive focus (Medical => medicine only) deadlocked: a tank
+            // hovering at its focus threshold would flip the fab in and out
+            // of that mode forever, so nothing but one product was ever
+            // made and the departure buffers never filled.
             let recipes: &[&Recipe] = match self.focus {
                 Focus::Idle => &[],
                 _ => &[&REC_O2, &REC_WATER, &REC_FOOD, &REC_MAT, &REC_MED],
@@ -1755,7 +1860,14 @@ impl Sim {
             // share one *global* cap — with a per-recipe cap the three
             // life-support refills alone drank more than the whole fab
             // budget and starved the repair and medical lines of it.
-            let mut plans: Vec<(&Recipe, f64, f64)> = Vec::new(); // (rec, demand_h, refill_h)
+            // The focus picks which lines' buffers fill first and in full.
+            let focus_lines: &[Res] = match self.focus {
+                Focus::LifeSupport => &[Res::Water, Res::Oxygen, Res::Food],
+                Focus::Repair => &[Res::Mat],
+                Focus::Medical => &[Res::Med],
+                Focus::Stockpile | Focus::Idle => &[],
+            };
+            let mut plans: Vec<(&Recipe, f64, f64, bool)> = Vec::new(); // (rec, demand_h, refill_h, focused)
             let mut refill_desired: f64 = 0.0;
             for rec in recipes {
                 if self.inv.fraction(rec.out) >= 0.98 {
@@ -1807,25 +1919,56 @@ impl Sim {
                         feed_starved = true;
                     }
                 }
+                let focused = focus_lines.contains(&rec.out);
                 let refill_h = if feed_starved
-                    || (rec.out == Res::Water && self.inv.fraction(Res::Food) < 0.3)
+                    || (rec.out == Res::Water && !focused && self.inv.fraction(Res::Food) < 0.3)
                 {
                     0.0
                 } else {
                     (target_frac * self.inv.cap(rec.out) - self.inv.get(rec.out)).max(0.0) / 20.0
                 };
-                refill_desired += refill_h;
-                plans.push((rec, demand_h, refill_h));
+                if !focused {
+                    refill_desired += refill_h;
+                }
+                plans.push((rec, demand_h, refill_h, focused));
             }
-            // Share the mining surplus: refills scale together toward the
-            // cap instead of the first recipes hogging it.
+            // Share the mining surplus: the other lines' refills scale
+            // together toward the cap instead of the first recipes hogging
+            // it. The focused lines' refills are not capped: that is what
+            // the focus is for (their ore is still guarded by the
+            // feed-starved check above).
             let refill_scale = if refill_desired > refill_cap_h && refill_desired > 1e-9 {
                 refill_cap_h / refill_desired
             } else {
                 1.0
             };
-            for (rec, demand_h, refill_h) in plans {
-                let want_h = demand_h + refill_h * refill_scale; // kg/h
+            let refill_of = |r: f64, focused: bool| if focused { r } else { r * refill_scale };
+            // Water is an input to the other lines, so it is made first,
+            // for what they will actually draw this hour (their refills
+            // included): sized from the population alone, the food and O2
+            // refills drank the tank dry while ice piled up unused.
+            let water_for: f64 = plans
+                .iter()
+                .filter(|p| p.0.out != Res::Water)
+                .map(|&(rec, d, r, f)| {
+                    let per = rec.inputs.iter().find(|(i, _)| *i == Res::Water).map_or(0.0, |(_, p)| *p);
+                    per * (d + refill_of(r, f))
+                })
+                .sum();
+            for plan in plans.iter_mut() {
+                if plan.0.out == Res::Water {
+                    plan.1 = people * WATER_PER_P_H + water_for;
+                }
+            }
+            // Two passes over the fab budget: first what is consumed (water
+            // first), so no focus ever starves the crew; then the buffer
+            // refills, the focused lines first.
+            plans.sort_by_key(|p| p.0.out != Res::Water);
+            let mut steps: Vec<(&Recipe, f64)> = plans.iter().map(|p| (p.0, p.1)).collect();
+            let mut refills: Vec<_> = plans.iter().filter(|p| p.2 > 0.0).collect();
+            refills.sort_by_key(|p| !p.3);
+            steps.extend(refills.into_iter().map(|&(rec, _, r, f)| (rec, refill_of(r, f))));
+            for (rec, want_h) in steps {
                 let mut max_by_raw = f64::INFINITY;
                 for (r, per) in rec.inputs {
                     // The fab never spends water below the emergency reserve —
@@ -1962,7 +2105,10 @@ impl Sim {
         }
 
         // ---------- radiation ----------
-        let rad = if at_star {
+        // In FTL the ship has left the system: no local radiation.
+        let rad = if tripping {
+            0.0
+        } else if at_star {
             sys.star_radiation_at(here)
         } else if at_planet {
             let host = sys.host_star(body_host);
@@ -2066,10 +2212,17 @@ impl Sim {
         self.repair_hull_and_wear(dt_h, hmax);
 
         // ---------- morale ----------
-        let good = self.inv.fraction(Res::Oxygen) > 0.5
-            && self.inv.fraction(Res::Water) > 0.5
-            && self.inv.fraction(Res::Food) > 0.5
-            && self.hull > hmax * 0.5;
+        // New Ship Morale Boost: on a new ship empty tanks are normal. Each
+        // store only counts once it has first passed the line.
+        if !self.new_ship_boost.is_empty() {
+            let inv = &self.inv;
+            self.new_ship_boost.retain(|r| inv.fraction(*r) <= MORALE_LINE);
+            if self.new_ship_boost.is_empty() {
+                self.log.push(self.t, Level::Info, "New Ship Morale Boost over: the stores are up, and from now on the crew worries if they run low.");
+            }
+        }
+        let stocked = |r: Res| self.inv.fraction(r) > MORALE_LINE || self.new_ship_boost.contains(&r);
+        let good = stocked(Res::Oxygen) && stocked(Res::Water) && stocked(Res::Food) && self.hull > hmax * 0.5;
         let mut dm = if good { 1.0 } else { -2.0 };
         // Shore leave: fresh air under an open sky.
         if body_shore && !moving && !tripping {
@@ -2221,7 +2374,6 @@ impl Sim {
         self.salvage_on = false; // the autopilot lives off ore, not luck
 
         let h2f = self.inv.fraction(Res::H2);
-        let fuel_crit = h2f < 0.7; // go hunt for fuel, stop doing everything else
 
         // Scoop anywhere there is atmosphere: at the star, or in a gas/ice
         // giant's envelope (which is far richer).
@@ -2406,6 +2558,13 @@ impl Sim {
         // the star. The return trigger (fuel_crit, 0.7) sits below it: that
         // hysteresis band is what keeps the ship from ping-ponging.
         let out_gate = if settled { 0.8 } else { 0.75 };
+        // Go hunt for fuel, stop doing everything else. With an ore
+        // critical the star sends the ship out mining down to 45% H2, so
+        // the planet must not call it back until below that: with the
+        // usual 70% line on this side only, an ark at exactly 70% shuttled
+        // star -> world -> star every 0.4 h, never mining and never
+        // filling its tank, until the crew died.
+        let fuel_crit = h2f < if most_critical.is_some() { 0.4 } else { 0.7 };
         if at_star {
             self.mining_on = false;
             if fuel_crit {
@@ -3075,10 +3234,16 @@ mod shuttle_tests {
             Some(ShuttleBlock::AlreadyThere)
         );
 
-        // Mid-leg: a started shuttle blocks the next one.
+        // Mid-leg: the autopilot's begin_shuttle will not start another
+        // (the player changes course with redirect_shuttle instead)...
         assert!(sim.begin_shuttle(&mut gal, Loc::Planet(0)).is_ok());
         assert_eq!(
             sim.begin_shuttle(&mut gal, Loc::Star).err(),
+            Some(ShuttleBlock::Shuttling)
+        );
+        // ...and a redirect to where it is already going says so.
+        assert_eq!(
+            sim.redirect_shuttle(&mut gal, Loc::Planet(0)).err(),
             Some(ShuttleBlock::Shuttling)
         );
 
@@ -3098,12 +3263,123 @@ mod shuttle_tests {
             Some(ShuttleBlock::Tripping)
         );
     }
+
+    /// A long leg can be turned around or redirected mid-flight: the new
+    /// leg starts where the ship is, and costs only its own distance.
+    #[test]
+    fn a_shuttle_can_turn_back_or_change_course() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 1, &mut gal);
+        sim.shuttle = None;
+        sim.trip = None;
+        sim.loc = Loc::Star;
+        let sys = gal.system_ref(sim.sys_id);
+        // The farthest world, and another one nearer in.
+        let far = (0..sys.planets.len()).max_by(|&a, &b| sys.planets[a].au.total_cmp(&sys.planets[b].au)).unwrap();
+        let near = (0..sys.planets.len()).min_by(|&a, &b| sys.planets[a].au.total_cmp(&sys.planets[b].au)).unwrap();
+        assert_ne!(far, near);
+        let far_au = sys.pos_au(Loc::Planet(far));
+        sim.redirect_shuttle(&mut gal, Loc::Planet(far)).unwrap();
+        let total = sim.shuttle.as_ref().unwrap().total_h;
+        sim.advance(total * 0.5, &mut gal);
+        let here = sim.shuttle_pos_au(gal.system_ref(sim.sys_id));
+        assert!((here - far_au * 0.5).abs() < far_au * 0.05, "halfway out: {here} of {far_au}");
+        // Turn back: home is half the way, so the trip back is about half.
+        let h2 = sim.inv.get(crate::sim::Res::H2);
+        sim.redirect_shuttle(&mut gal, Loc::Star).unwrap();
+        let back = sim.shuttle.as_ref().unwrap().total_h;
+        assert!(back < total * 0.6, "turning back costs the way back only: {back} vs {total}");
+        assert!(sim.inv.get(crate::sim::Res::H2) < h2, "the new leg burns fuel");
+        // Change course again, mid-way home, for the inner world.
+        sim.advance(back * 0.5, &mut gal);
+        let here2 = sim.shuttle_pos_au(gal.system_ref(sim.sys_id));
+        assert!(here2 < here && here2 > 0.0, "partway home: {here2}");
+        sim.redirect_shuttle(&mut gal, Loc::Planet(near)).unwrap();
+        assert_eq!(sim.shuttle.as_ref().unwrap().path.len(), 2);
+        let mut guard = 0;
+        while sim.shuttle.is_some() && guard < 10_000 {
+            sim.advance(0.1, &mut gal);
+            guard += 1;
+        }
+        assert_eq!(sim.loc, Loc::Planet(near));
+    }
 }
 
 #[cfg(test)]
 mod fix_tests {
     use super::*;
     use crate::sim::galaxy::Galaxy;
+
+    /// An ark with plenty of ice but an empty water tank and low food:
+    /// the food fab's refill used to drink every drop the water line made
+    /// (sized for the population alone), so water sat at zero and oxygen,
+    /// fabbed first, got none.
+    #[test]
+    fn ice_keeps_the_water_up_while_food_refills() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 2, &mut gal);
+        sim.shuttle = None;
+        sim.pax.count = 96;
+        sim.crew.health = 100.0;
+        sim.pax.health = 100.0;
+        sim.focus = Focus::Stockpile;
+        sim.inv.stock.insert(Res::Water, 0.0);
+        sim.inv.stock.insert(Res::Ice, 9_000.0);
+        let cap = |sim: &Sim, r: Res| sim.inv.cap(r);
+        let food = cap(&sim, Res::Food) * 0.27;
+        sim.inv.stock.insert(Res::Food, food);
+        let o2 = cap(&sim, Res::Oxygen) * 0.21;
+        sim.inv.stock.insert(Res::Oxygen, o2);
+        for _ in 0..40 {
+            sim.advance(0.1, &mut gal);
+        }
+        assert!(sim.inv.get(Res::Water) > 100.0, "water stays at {}", sim.inv.get(Res::Water));
+        assert!(sim.inv.get(Res::Oxygen) > o2, "oxygen {o2} -> {}", sim.inv.get(Res::Oxygen));
+        assert!(sim.inv.get(Res::Food) > food, "food {food} -> {}", sim.inv.get(Res::Food));
+    }
+
+    /// Seed 1's ark reached a system at exactly 70% H2 with carbon
+    /// critical: the star sent it out mining (critical ore: 45% line), the
+    /// world sent it back for fuel (70% line), every 0.4 h, until the crew
+    /// died on day 54. The two lines now agree.
+    #[test]
+    fn the_seed_1_ark_does_not_shuttle_itself_to_death() {
+        let mut gal = Galaxy::new(1);
+        let mut sim = Sim::new_game(1, 2, &mut gal);
+        for _ in 0..(60 * 24 * 4) {
+            sim.autopilot(&mut gal);
+            sim.advance(0.25, &mut gal);
+            assert!(sim.over.is_none(), "lost on day {:.1}: {:?}", sim.t_h() / 24.0, sim.over);
+        }
+    }
+
+    /// The fab focus decides whose tank fills first: each focused line
+    /// ends up fuller than it does under Stockpile.
+    #[test]
+    fn fab_focus_changes_what_is_made() {
+        let run = |focus: Focus, r: Res| {
+            let mut gal = Galaxy::new(42);
+            let mut sim = Sim::new_game(42, 1, &mut gal);
+            sim.shuttle = None;
+            sim.focus = focus;
+            for x in [Res::Water, Res::Oxygen, Res::Food, Res::Mat, Res::Med] {
+                let c = sim.inv.cap(x);
+                sim.inv.stock.insert(x, c * 0.3);
+            }
+            for x in [Res::Ice, Res::Metal, Res::Silicate, Res::Carbon, Res::Nitrogen] {
+                let c = sim.inv.cap(x);
+                sim.inv.stock.insert(x, c);
+            }
+            for _ in 0..50 {
+                sim.advance(0.1, &mut gal);
+            }
+            sim.inv.get(r)
+        };
+        for (focus, r) in [(Focus::LifeSupport, Res::Water), (Focus::LifeSupport, Res::Oxygen), (Focus::Repair, Res::Mat), (Focus::Medical, Res::Med)] {
+            let (f, base) = (run(focus, r), run(Focus::Stockpile, r));
+            assert!(f > base * 1.02, "{focus:?}: {r:?} {f:.0} vs {base:.0} under Stockpile");
+        }
+    }
 
     /// Micrometeorites used `exp(-ln λ)` = 1/λ as the Knuth threshold, so
     /// for λ < 1 the count was always zero. The mean must track λ.
@@ -3177,6 +3453,34 @@ mod fix_tests {
         assert!(!sim.repairing_hull || sim.hull >= hmax);
         let spent = before - mat(&sim);
         assert!((spent - missing / 0.5 * 0.8).abs() < 1e-6, "spent {spent} for {missing} hull");
+    }
+
+    /// Radiation is local to the system: once the ship is in FTL, the star
+    /// it left behind must no longer irradiate it.
+    #[test]
+    fn no_radiation_during_ftl() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 0, &mut gal);
+        sim.shuttle = None;
+        sim.trip = None;
+        sim.loc = Loc::Star;
+        sim.shields = false;
+        // Sanity: parked at the star unshielded, radiation does bite.
+        sim.advance(0.01, &mut gal);
+        assert!(sim.warned.contains_key("rad"), "test star must be radioactive");
+
+        sim.warned.clear();
+        sim.trip = Some(Trip {
+            dest_id: 1,
+            dest_pos: [1.0, 0.0],
+            dest_name: "Test".into(),
+            dist_ly: 10.0,
+            total_h: 10.0,
+            remaining_h: 5.0,
+            dust_rate: 0.0,
+        });
+        sim.advance(0.01, &mut gal);
+        assert!(!sim.warned.contains_key("rad"), "radiation leaked into the FTL jump");
     }
 
     /// Per-step random rolls must not repeat just because several steps

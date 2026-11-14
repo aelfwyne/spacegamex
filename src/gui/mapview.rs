@@ -12,6 +12,8 @@ use crate::sim::{fmt_hours, ShipSpec, Sim};
 use eframe::egui::{self, vec2, Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
 const RADIUS: f32 = 30.0;
+/// The tagged navigation target (`Sim::waypoint`).
+pub const TARGET_COL: Color32 = Color32::from_rgb(110, 235, 200);
 
 pub fn draw(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     egui::Panel::right("map_list")
@@ -160,48 +162,83 @@ fn chart(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             }
         }
     }
-    // Your colony: marked where it is, or an arrow at the chart's edge
-    // pointing home (click it to pan there).
-    if let Some((cpos, dist, name)) = colony_fix(app) {
-        let cp = to_screen(cpos);
+    // Every colony you hold is marked where it is on the chart; the
+    // selected one (Colony screen) also gets a pointer, or an arrow at the
+    // chart's edge when it is off it (click that to pan there).
+    let here_pos = app.gal.system_ref(sim.sys_id).pos;
+    let sel_sys = colony_fix(app).map(|_| selected(app).map_or(0, |c| c.sys_id));
+    for c in sim.all_colonies() {
+        let pos = crate::sim::Galaxy::pos_of(c.sys_id);
+        let cp = to_screen(pos);
+        if c.sys_id == sim.sys_id || !rect.shrink(16.0).contains(cp) {
+            continue;
+        }
         let col = super::sysview::COLONY_COL;
-        if rect.shrink(16.0).contains(cp) {
-            if sim.sys_id != app.sim().colony.as_ref().map_or(0, |c| c.sys_id) {
-                let d = 9.0;
-                let pts = vec![cp + vec2(-d, d * 0.2), cp + vec2(0.0, -d), cp + vec2(d, d * 0.2), cp + vec2(-d, d * 0.2)];
-                painter.add(egui::Shape::line(pts, Stroke::new(1.8, col)));
-                painter.text(cp + vec2(0.0, 10.0), Align2::CENTER_TOP, format!("COLONY · {dist:.1} ly"), FontId::proportional(11.0), col);
+        let dist = ((pos[0] - here_pos[0]).powi(2) + (pos[1] - here_pos[1]).powi(2)).sqrt();
+        let d = 9.0;
+        let pts = vec![cp + vec2(-d, d * 0.2), cp + vec2(0.0, -d), cp + vec2(d, d * 0.2), cp + vec2(-d, d * 0.2)];
+        painter.add(egui::Shape::line(pts, Stroke::new(1.8, col)));
+        painter.text(cp + vec2(0.0, 10.0), Align2::CENTER_TOP, format!("{} · {dist:.1} ly", c.name), FontId::proportional(11.0), col);
+        if Some(c.sys_id) == sel_sys {
+            let tip = cp + vec2(0.0, -13.0);
+            painter.add(egui::Shape::convex_polygon(vec![tip, tip + vec2(-7.0, -11.0), tip + vec2(7.0, -11.0)], col, Stroke::NONE));
+        }
+    }
+    // Edge arrows toward the selected colony and the tagged target when
+    // they are off the chart (click one to pan there).
+    let mut guides = vec![];
+    if let Some((cpos, dist, name)) = colony_fix(app) {
+        guides.push((cpos, format!("{name} · {dist:.1} ly"), super::sysview::COLONY_COL));
+    }
+    if let Some((tpos, dist, name, tid)) = waypoint_fix(app) {
+        let tp = to_screen(tpos);
+        if tid != sim.sys_id && rect.shrink(16.0).contains(tp) {
+            // On the chart: a crosshair ring.
+            painter.circle_stroke(tp, 15.0, Stroke::new(1.8, TARGET_COL));
+            for d in [vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)] {
+                painter.line_segment([tp + d * 11.0, tp + d * 19.0], Stroke::new(1.8, TARGET_COL));
             }
-        } else {
-            let dir = (cp - rect.center()).normalized();
-            // Where the ray from the centre leaves the (inset) chart.
-            let half = rect.shrink(34.0).size() / 2.0;
-            let t = (half.x / dir.x.abs().max(1e-6)).min(half.y / dir.y.abs().max(1e-6));
-            let tip = rect.center() + dir * t;
-            let side = vec2(-dir.y, dir.x);
-            let pts = vec![tip + dir * 12.0, tip - dir * 6.0 + side * 9.0, tip - dir * 6.0 - side * 9.0];
-            painter.add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
-            let label_at = tip - dir * 18.0;
-            let align = Align2([
-                if dir.x > 0.3 { egui::Align::Max } else if dir.x < -0.3 { egui::Align::Min } else { egui::Align::Center },
-                if dir.y > 0.3 { egui::Align::Max } else if dir.y < -0.3 { egui::Align::Min } else { egui::Align::Center },
-            ]);
-            painter.text(label_at, align, format!("{name} · {dist:.1} ly"), FontId::proportional(12.0), col);
-            let hit = egui::Rect::from_center_size(tip, vec2(36.0, 36.0));
-            if resp.clicked() && resp.interact_pointer_pos().is_some_and(|p| hit.contains(p)) {
-                view.map_pan = vec2((cpos[0] - here[0]) as f32, (cpos[1] - here[1]) as f32);
-            }
+            painter.text(tp + vec2(0.0, -21.0), Align2::CENTER_BOTTOM, format!("TARGET {name} · {dist:.1} ly"), FontId::proportional(11.0), TARGET_COL);
+        }
+        guides.push((tpos, format!("target {name} · {dist:.1} ly"), TARGET_COL));
+    }
+    let mut pan_to = None;
+    for (gpos, label, col) in guides {
+        let gp = to_screen(gpos);
+        if rect.shrink(16.0).contains(gp) {
+            continue;
+        }
+        let dir = (gp - rect.center()).normalized();
+        // Where the ray from the centre leaves the (inset) chart.
+        let half = rect.shrink(34.0).size() / 2.0;
+        let t = (half.x / dir.x.abs().max(1e-6)).min(half.y / dir.y.abs().max(1e-6));
+        let tip = rect.center() + dir * t;
+        let side = vec2(-dir.y, dir.x);
+        let pts = vec![tip + dir * 12.0, tip - dir * 6.0 + side * 9.0, tip - dir * 6.0 - side * 9.0];
+        painter.add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
+        let label_at = tip - dir * 18.0;
+        let align = Align2([
+            if dir.x > 0.3 { egui::Align::Max } else if dir.x < -0.3 { egui::Align::Min } else { egui::Align::Center },
+            if dir.y > 0.3 { egui::Align::Max } else if dir.y < -0.3 { egui::Align::Min } else { egui::Align::Center },
+        ]);
+        painter.text(label_at, align, label, FontId::proportional(12.0), col);
+        let hit = egui::Rect::from_center_size(tip, vec2(36.0, 36.0));
+        if resp.clicked() && resp.interact_pointer_pos().is_some_and(|p| hit.contains(p)) {
+            pan_to = Some(vec2((gpos[0] - here[0]) as f32, (gpos[1] - here[1]) as f32));
         }
     }
 
     // Here.
+    if let Some(p) = pan_to {
+        view.map_pan = p;
+    }
     paint::star(&painter, c0, 5.0, app.gal.system_ref(sim.sys_id).star.class.color(), 0.0);
     painter.circle_stroke(c0, 11.0, Stroke::new(2.0, GOOD));
     painter.text(c0 + vec2(0.0, 14.0), Align2::CENTER_TOP, "YOU", FontId::proportional(11.0), GOOD);
 
     // Legend.
     let lg = rect.left_bottom() + vec2(10.0, -10.0);
-    painter.text(lg, Align2::LEFT_BOTTOM, "drag: pan   wheel: zoom   click: select   double-click: set destination   orange arrow: your colony (click to pan there)", FontId::proportional(11.5), DIM);
+    painter.text(lg, Align2::LEFT_BOTTOM, "drag: pan   wheel: zoom   click: select   double-click: set destination   arrows: orange = selected colony, green = target (click to pan there)", FontId::proportional(11.5), DIM);
     painter.text(lg + vec2(0.0, -16.0), Align2::LEFT_BOTTOM, "rings: magenta = interstellar natives   cyan = spacefaring natives   grey = pre-space   orange = colony   double dot = binary", FontId::proportional(11.5), DIM);
 
     if let Some(i) = hovered {
@@ -216,15 +253,65 @@ fn chart(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     }
 }
 
-/// Your colony's position, distance from here (ly) and name, if you have
-/// one.
+/// The colony selected on the Colony screen (the capital by default).
+fn selected(app: &App) -> Option<&crate::sim::colony::PlayerColony> {
+    let sim = app.sim();
+    sim.colony_at(app.sel_colony.min(sim.outposts.len()))
+}
+
+/// The selected colony's position, distance from here (ly) and name, if
+/// you have one.
 fn colony_fix(app: &App) -> Option<([f64; 2], f64, String)> {
     let sim = app.sim();
-    let c = sim.colony.as_ref()?;
+    let c = selected(app)?;
     let here = app.gal.system_ref(sim.sys_id).pos;
     let pos = crate::sim::Galaxy::pos_of(c.sys_id);
     let dist = ((pos[0] - here[0]).powi(2) + (pos[1] - here[1]).powi(2)).sqrt();
     Some((pos, dist, c.name.clone()))
+}
+
+/// The tagged target's position, distance from here (ly), name and id.
+fn waypoint_fix(app: &App) -> Option<([f64; 2], f64, String, u64)> {
+    let sim = app.sim();
+    let id = sim.waypoint?;
+    let here = app.gal.system_ref(sim.sys_id).pos;
+    let pos = crate::sim::Galaxy::pos_of(id);
+    let dist = ((pos[0] - here[0]).powi(2) + (pos[1] - here[1]).powi(2)).sqrt();
+    let name = app
+        .visited_list
+        .iter()
+        .chain(app.map_list.iter())
+        .find(|n| n.id == id)
+        .map(|n| n.star_name.clone())
+        .or_else(|| (id == sim.sys_id).then(|| app.gal.system_ref(id).star.name.clone()))
+        .unwrap_or_else(|| "?".into());
+    Some((pos, dist, name, id))
+}
+
+/// "Show" (pan there) and "Select" / "Best hop" buttons toward a far
+/// system `id` at `pos`.
+fn guide_buttons(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>, what: &str, (id, pos): (u64, [f64; 2])) {
+    let sim = app.sim();
+    let here = app.gal.system_ref(sim.sys_id).pos;
+    let dist = ((pos[0] - here[0]).powi(2) + (pos[1] - here[1]).powi(2)).sqrt();
+    if ui.small_button("Show").on_hover_text(format!("Pan the chart to your {what}.")).clicked() {
+        view.map_pan = vec2((pos[0] - here[0]) as f32, (pos[1] - here[1]) as f32);
+    }
+    if let Some(i) = app.map_list.iter().position(|n| n.id == id) {
+        if ui.small_button("Select").clicked() {
+            acts.push(Action::MapSelect(i));
+        }
+    } else if let Some((i, rest)) = app
+        .map_list
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (i, ((n.pos[0] - pos[0]).powi(2) + (n.pos[1] - pos[1]).powi(2)).sqrt()))
+        .filter(|&(_, d)| d < dist)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        && ui.small_button("Best hop").on_hover_text(format!("Select the charted system closest to the {what} ({rest:.1} ly from it).")).clicked()
+    {
+        acts.push(Action::MapSelect(i));
+    }
 }
 
 fn to_world(p: Pos2, center: Pos2, view: &View) -> Vec2 {
@@ -259,7 +346,10 @@ fn side(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     let sim = app.sim();
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        section(ui, "NEARBY SYSTEMS");
+        section(ui, if view.map_visited { "VISITED SYSTEMS" } else { "NEARBY SYSTEMS" });
+        ui.selectable_value(&mut view.map_visited, false, format!("Nearby ({})", app.map_list.len()));
+        ui.selectable_value(&mut view.map_visited, true, format!("Visited ({})", app.visited_list.len()))
+            .on_hover_text("Every system you have been to, at any range. Tag one as your target and the chart points the way.");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Re-center").clicked() {
                 view.map_zoom = 0.0;
@@ -271,33 +361,35 @@ fn side(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     bar_colored(ui, charge / 100.0, format!("FTL charge {charge:.0}%"), ui.available_width(), if charge >= 100.0 { GOOD } else { ACCENT });
     // The way home.
     if let Some((cpos, dist, name)) = colony_fix(app) {
-        let col_sys = sim.colony.as_ref().map(|c| c.sys_id);
+        let col_sys = selected(app).map(|c| c.sys_id);
         ui.horizontal(|ui| {
             let col = super::sysview::COLONY_COL;
+            let n = sim.colony_count();
+            if n > 1 && ui.small_button("▶ Next").on_hover_text("Point the chart at your next colony.").clicked() {
+                acts.push(Action::SelectColony((app.sel_colony.min(n - 1) + 1) % n));
+            }
             if col_sys == Some(sim.sys_id) {
                 ui.label(RichText::new(format!("Colony {name}: in this system")).color(col));
                 return;
             }
             ui.label(RichText::new(format!("Colony {name}: {dist:.1} ly")).color(col));
-            if ui.small_button("Show").on_hover_text("Pan the chart to your colony.").clicked() {
-                let here = app.gal.system_ref(sim.sys_id).pos;
-                view.map_pan = vec2((cpos[0] - here[0]) as f32, (cpos[1] - here[1]) as f32);
+            if let Some(id) = col_sys {
+                guide_buttons(ui, app, view, acts, "colony", (id, cpos));
             }
-            if let Some(i) = app.map_list.iter().position(|n| Some(n.id) == col_sys) {
-                if ui.small_button("Select").clicked() {
-                    acts.push(Action::MapSelect(i));
-                }
-            } else if let Some((i, rest)) = app
-                .map_list
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (i, ((n.pos[0] - cpos[0]).powi(2) + (n.pos[1] - cpos[1]).powi(2)).sqrt()))
-                .filter(|&(_, d)| d < dist)
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                && ui.small_button("Best hop").on_hover_text(format!("Select the charted system closest to the colony ({rest:.1} ly from it).")).clicked()
-            {
-                acts.push(Action::MapSelect(i));
+        });
+    }
+    // The tagged target.
+    if let Some((tpos, dist, name, tid)) = waypoint_fix(app) {
+        ui.horizontal(|ui| {
+            if ui.small_button("✕").on_hover_text("Clear the target.").clicked() {
+                acts.push(Action::ToggleWaypoint(tid));
             }
+            if tid == sim.sys_id {
+                ui.label(RichText::new(format!("Target {name}: in this system")).color(TARGET_COL));
+                return;
+            }
+            ui.label(RichText::new(format!("Target {name}: {dist:.1} ly")).color(TARGET_COL));
+            guide_buttons(ui, app, view, acts, "target", (tid, tpos));
         });
     }
 
@@ -310,10 +402,13 @@ fn side(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                 if sim.destination == Some(n.id) {
                     ui.label(RichText::new("DESTINATION").color(ACCENT).strong());
                 }
+                if sim.waypoint == Some(n.id) {
+                    ui.label(RichText::new("TARGET").color(TARGET_COL).strong());
+                }
             });
             neighbor_facts(ui, sim, n);
             if let Some((cpos, _, _)) = colony_fix(app)
-                && sim.colony.as_ref().is_some_and(|c| c.sys_id != n.id)
+                && selected(app).is_some_and(|c| c.sys_id != n.id)
             {
                 let d = ((n.pos[0] - cpos[0]).powi(2) + (n.pos[1] - cpos[1]).powi(2)).sqrt();
                 ui.label(RichText::new(format!("{d:.1} ly from your colony")).color(super::sysview::COLONY_COL));
@@ -339,11 +434,23 @@ fn side(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                 if r.on_disabled_hover_text(why).clicked() {
                     acts.push(Action::JumpTo(n.id));
                 }
+                let tagged = sim.waypoint == Some(n.id);
+                if ui
+                    .button(RichText::new(if tagged { "Untarget" } else { "Target" }).color(TARGET_COL))
+                    .on_hover_text("Tag as your navigation target: the chart points the way to it from anywhere.")
+                    .clicked()
+                {
+                    acts.push(Action::ToggleWaypoint(n.id));
+                }
             });
         });
     }
     ui.add_space(4.0);
 
+    if view.map_visited {
+        visited_list(ui, app, view, acts);
+        return;
+    }
     let sel_changed = view.last_map_sel != app.map_sel;
     view.last_map_sel = app.map_sel;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -376,14 +483,72 @@ fn side(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
                 }
                 ui.label(RichText::new(format!("{}{}", n.star_class, if n.giant { "★" } else { "" })).color(c(n.class.color())));
                 ui.label(format!("{:.1}", n.dist_ly));
-                match n.civ {
-                    Some(t) => ui.label(RichText::new(match t {
-                        CivTier::T3 => "interstellar",
-                        CivTier::T2 => "planetary",
-                        CivTier::T1 => "primitive",
-                    }).color(civ_color(Some(t)).unwrap_or(TEXT))),
-                    None => ui.label(""),
-                };
+                civ_cell(ui, n.civ);
+                ui.label(format!("{}", n.n_planets));
+                ui.end_row();
+            }
+        });
+    });
+}
+
+fn civ_cell(ui: &mut Ui, civ: Option<CivTier>) {
+    match civ {
+        Some(t) => ui.label(RichText::new(match t {
+            CivTier::T3 => "interstellar",
+            CivTier::T2 => "planetary",
+            CivTier::T1 => "primitive",
+        }).color(civ_color(Some(t)).unwrap_or(TEXT))),
+        None => ui.label(""),
+    };
+}
+
+/// Every system visited, at any range, nearest first. Click to select it
+/// (or pan the chart to it, beyond 30 ly); ◎ or double-click tags it as
+/// the target.
+fn visited_list(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
+    let sim = app.sim();
+    let here = app.gal.system_ref(sim.sys_id).pos;
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        egui::Grid::new("visited").num_columns(6).striped(true).spacing([10.0, 3.0]).show(ui, |ui| {
+            for h in ["", "System", "Cls", "ly", "Civ", "Worlds"] {
+                ui.label(dim(h));
+            }
+            ui.end_row();
+            if app.visited_list.is_empty() {
+                ui.label("");
+                ui.label(dim("no other systems visited yet"));
+                ui.end_row();
+            }
+            for n in &app.visited_list {
+                let tagged = sim.waypoint == Some(n.id);
+                let mark = RichText::new(if tagged { "◉" } else { "◎" }).color(if tagged { TARGET_COL } else { DIM });
+                if ui
+                    .add(egui::Button::new(mark).small().frame(false))
+                    .on_hover_text(if tagged { "Clear the target." } else { "Tag as your target: the chart points the way." })
+                    .clicked()
+                {
+                    acts.push(Action::ToggleWaypoint(n.id));
+                }
+                let charted = app.map_list.iter().position(|m| m.id == n.id);
+                let sel = charted == Some(app.map_sel);
+                let mut name = RichText::new(&n.star_name);
+                if tagged {
+                    name = name.color(TARGET_COL).strong();
+                } else if sim.destination == Some(n.id) {
+                    name = name.color(ACCENT).strong();
+                }
+                let r = ui.selectable_label(sel, name).on_hover_ui(|ui| neighbor_facts(ui, sim, n));
+                if r.double_clicked() {
+                    acts.push(Action::ToggleWaypoint(n.id));
+                } else if r.clicked() {
+                    view.map_pan = vec2((n.pos[0] - here[0]) as f32, (n.pos[1] - here[1]) as f32);
+                    if let Some(i) = charted {
+                        acts.push(Action::MapSelect(i));
+                    }
+                }
+                ui.label(RichText::new(format!("{}{}", n.star_class, if n.giant { "★" } else { "" })).color(c(n.class.color())));
+                ui.label(RichText::new(format!("{:.1}", n.dist_ly)).color(if charted.is_some() { TEXT } else { DIM }));
+                civ_cell(ui, n.civ);
                 ui.label(format!("{}", n.n_planets));
                 ui.end_row();
             }

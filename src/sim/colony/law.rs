@@ -14,6 +14,8 @@ pub enum Law {
     FreeEnterprise,
     MartialLaw,
     Emancipation,
+    /// The captain's line rules: a million is a beginning, not an end.
+    Hegemony,
 }
 
 /// What the laws in force do, combined. Multipliers start at 1, offsets
@@ -64,7 +66,7 @@ impl Default for LawFx {
 pub const MIN_TERM_Y: f64 = 1.0;
 
 impl Law {
-    pub const ALL: [Law; 10] = [
+    pub const ALL: [Law; 11] = [
         Law::BeFruitful,
         Law::FamilyPlanning,
         Law::Matchmaking,
@@ -75,6 +77,7 @@ impl Law {
         Law::FreeEnterprise,
         Law::MartialLaw,
         Law::Emancipation,
+        Law::Hegemony,
     ];
 
     pub fn name(self) -> &'static str {
@@ -89,6 +92,7 @@ impl Law {
             Law::FreeEnterprise => "Free Enterprise",
             Law::MartialLaw => "Martial Law",
             Law::Emancipation => "Emancipation",
+            Law::Hegemony => "Hegemony",
         }
     }
 
@@ -104,6 +108,7 @@ impl Law {
             Law::FreeEnterprise => "Let the market sort it out.",
             Law::MartialLaw => "Armed patrols keep the wilds and the restless at bay.",
             Law::Emancipation => "Captives are freed and given a stake in the colony.",
+            Law::Hegemony => "The captain's house rules by right, and the crown passes down the Royal Lineage.",
         }
     }
 
@@ -119,6 +124,7 @@ impl Law {
             Law::FreeEnterprise => "Wealth +0.10",
             Law::MartialLaw => "World dangers −50%",
             Law::Emancipation => "Captive penalties halved",
+            Law::Hegemony => "Found more colonies with settlers; buy colony arks; at a million, continue the Royal Lineage",
         }
     }
 
@@ -134,6 +140,7 @@ impl Law {
             Law::FreeEnterprise => "Happiness −0.03, health −0.02",
             Law::MartialLaw => "Happiness −0.15",
             Law::Emancipation => "Materials −10%",
+            Law::Hegemony => "Happiness −0.05, wealth −0.03",
         }
     }
 
@@ -199,6 +206,10 @@ impl Law {
             Law::Emancipation => {
                 f.captives *= 0.5;
                 f.produce *= 0.9;
+            }
+            Law::Hegemony => {
+                f.happy -= 0.05;
+                f.wealth -= 0.03;
             }
         }
     }

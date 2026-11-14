@@ -99,6 +99,22 @@ impl StarSystem {
         }
     }
 
+    /// Let the cargo market's stock recover for the time since it was last
+    /// topped up (game time `t`, seconds).
+    pub fn restock_cargo_market(&mut self, seed: u64, t: f64) {
+        self.refresh_cargo_market(seed);
+        let Some(civ) = &self.civ else { return };
+        let Some(m) = self.market.as_ref() else { return };
+        if (t - m.stocked_t) < super::people::SECS_PER_DAY {
+            return;
+        }
+        let size = (self.civ_population().max(1.0).log10() / 9.0).clamp(0.0, 1.0);
+        let usual = super::cargo::CargoMarket::generate(seed, self.id, civ, size);
+        if let Some(m) = self.market.as_mut() {
+            m.restock(&usual, t);
+        }
+    }
+
     /// Every dockable body: planets, belts, and the moons of gas giants.
     pub fn sites(&self) -> Vec<(Loc, &Planet)> {
         let mut v = Vec::new();

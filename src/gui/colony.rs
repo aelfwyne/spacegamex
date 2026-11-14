@@ -148,28 +148,54 @@ fn city_lights(painter: &egui::Painter, c: Pos2, r: f32, col: &PlayerColony, lig
 }
 
 /// The tabbed colony panel.
+/// The colony on screen (the capital unless another is selected).
+pub fn viewed(app: &App) -> Option<&PlayerColony> {
+    let sim = app.sim();
+    sim.colony_at(app.sel_colony.min(sim.outposts.len())).or(sim.colony.as_ref())
+}
+
 pub fn panel(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     let sim = app.sim();
-    let Some(col) = &sim.colony else {
+    let Some(col) = viewed(app) else {
         ui.label("You have no colony.");
         return;
     };
+    let sel = app.sel_colony.min(sim.outposts.len());
+    if sim.colony_count() > 1 {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(dim("Colonies:"));
+            for (i, c) in sim.all_colonies().enumerate() {
+                let label = format!("{}{}{}", if i == sel { "▶ " } else { "" }, c.name, if i == 0 { " (capital)" } else { "" });
+                let text = RichText::new(label).strong().color(if i == sel { KEY } else { TEXT });
+                if ui
+                    .add(egui::Button::selectable(i == sel, text))
+                    .on_hover_text(format!("{} on {} · pop {}", c.name, c.world, fmt_pop(c.population())))
+                    .clicked()
+                {
+                    acts.push(Action::SelectColony(i));
+                }
+            }
+        });
+    }
     // Mode controls.
     ui.horizontal_wrapped(|ui| {
         if sim.in_colony {
             ui.label(RichText::new("COLONY MODE").strong().color(GOOD));
             let b = ui.add_enabled(!sim.ship_dormant, egui::Button::new("Fly the ship (leave the colony)"));
-            if b.on_disabled_hover_text("The ship is lost.").clicked() {
+            if b.on_disabled_hover_text("The ship is lost. Take command of another from the Fleet tab.").clicked() {
                 acts.push(Action::LeaveColony);
             }
         } else {
             ui.label(RichText::new("You are away with the ship").color(WARN));
             let here = sim.sys_id == col.sys_id && sim.loc == col.loc && sim.trip.is_none() && sim.shuttle.is_none();
-            if ui.add_enabled(here, egui::Button::new("Return to the colony")).on_disabled_hover_text(format!("Dock at {} first.", col.world)).clicked() {
+            if col.outpost {
+                ui.label(dim(format!("{} is run by its settlers: your family lives at the capital.", col.name)));
+            } else if ui.add_enabled(here, egui::Button::new("Return to the colony")).on_disabled_hover_text(format!("Dock at {} first.", col.world)).clicked() {
                 acts.push(Action::EnterColony);
             }
         }
     });
+    materials_strip(ui, col);
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         for (t, label) in [
@@ -180,6 +206,7 @@ pub fn panel(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             (ColonyTab::Family, "Family"),
             (ColonyTab::Laws, "Laws"),
             (ColonyTab::Market, "Space dock"),
+            (ColonyTab::Fleet, "Fleet"),
         ] {
             if ui.add(egui::Button::selectable(app.colony_tab == t, RichText::new(label).strong())).clicked() {
                 acts.push(Action::SetColonyTab(t));
@@ -195,7 +222,147 @@ pub fn panel(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         ColonyTab::Census => census(ui, sim, col, acts),
         ColonyTab::Family => family(ui, app, sim, col, acts),
         ColonyTab::Market => market(ui, app, sim, col, acts),
+        ColonyTab::Fleet => fleet(ui, sim, col, acts),
     }
+}
+
+/// "+12 t/yr" with a sign, coloured by direction.
+fn rate_text(v: f64) -> RichText {
+    let s = format!("{}{:.0} t/yr", if v >= 0.0 { "+" } else { "−" }, v.abs());
+    RichText::new(s).color(if v >= 0.5 { GOOD } else if v <= -0.5 { BAD } else { TEXT })
+}
+
+/// The materials stockpile and where it is heading, always in view.
+fn materials_strip(ui: &mut Ui, col: &PlayerColony) {
+    let i = &col.ind;
+    let tip = format!(
+        "Raw materials: building, laws, the manufacturing plant and trade all draw on them.\n\nMined and hauled  +{:.0} t/yr\nUpkeep  −{:.0} t/yr\nConstruction  −{:.0} t/yr\nManufacturing plant  −{:.0} t (last year)\n\nAdd more by unloading spare raw materials from the ship (Supplies tab), or with Resource Drones.",
+        i.materials_made_y, i.materials_upkeep_y, i.materials_build_y, col.plant_spent_t
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("MATERIALS").small().color(DIM));
+        ui.label(RichText::new(format!("{:.0} t", col.materials)).strong().color(if col.materials < 1.0 { BAD } else { KEY }));
+        ui.label(rate_text(col.materials_trend_y()));
+        if !col.queue.is_empty() {
+            ui.label(dim(format!("· building {}", col.queue[0].kind.name())));
+        }
+    })
+    .response
+    .on_hover_text(tip);
+}
+
+/// One line of a hull's numbers.
+fn ship_line(s: &crate::sim::ShipSpec) -> String {
+    format!(
+        "{} · crew {} · hull {:.0} · hold {:.0} t · FTL {:.0} ly/h · attack {:.1} / defense {:.1}",
+        s.role.name(),
+        s.crew,
+        s.hull,
+        s.cargo_t,
+        s.ftl_speed,
+        s.attack,
+        s.defense
+    )
+}
+
+fn fleet(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) {
+    use crate::sim::{SHIPS, STARTERS};
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        section(ui, "YOUR FLEET");
+        ui.label(dim("Every ship keeps its own stores, cargo, crew and fittings. You, your partner and your pilot move between them here at the colony."));
+        if sim.ship_dormant {
+            ui.label(RichText::new("Flagship: none — your ship was lost.").color(BAD));
+        } else {
+            let s = sim.ship();
+            ui.label(RichText::new(format!("Flagship: {} (hull {:.0}%, hold {:.0}/{:.0} t)", s.name, sim.hull / s.hull * 100.0, sim.hold.mass_t(), s.cargo_t)).strong().color(GOOD));
+        }
+        let switch_ok = sim.at_fleet();
+        if sim.fleet.is_empty() {
+            ui.label(dim("No ships laid up. Buy one at an interstellar shipyard (Trade › Port) and add it to the fleet, or build one here."));
+        }
+        for (i, b) in sim.fleet.iter().enumerate() {
+            let s = b.spec();
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(s.name).strong());
+                    ui.label(dim(format!("hull {:.0}% · hold {:.0}/{:.0} t · H2 {:.0} kg · {} crew", b.hull / s.hull * 100.0, b.hold.mass_t(), s.cargo_t, b.inv.get(crate::sim::Res::H2), b.crew.len())));
+                });
+                ui.label(dim(ship_line(s)));
+                if b.pax.count > 0 {
+                    let royal = b.settlers.iter().take(b.pax.count).filter(|e| e.royal).count();
+                    let kin = if royal > 0 { format!(", {royal} of the royal line") } else { String::new() };
+                    ui.label(RichText::new(format!("{} settlers aboard{kin}: take command and found a colony with them.", b.pax.count)).color(GOOD));
+                }
+                ui.horizontal(|ui| {
+                    let mut r = ui.add_enabled(switch_ok.is_ok(), egui::Button::new("Take command"));
+                    if let Err(e) = &switch_ok {
+                        r = r.on_disabled_hover_text(e.clone());
+                    }
+                    if r.clicked() {
+                        acts.push(Action::SwitchShip(i));
+                    }
+                    if ui.small_button(RichText::new("Break up").color(BAD)).on_hover_text("Scrap it for colony materials. Its cargo is lost.").clicked() {
+                        acts.push(Action::ScrapShip(i));
+                    }
+                });
+            });
+        }
+        ui.add_space(6.0);
+        section(ui, "SHIPYARD");
+        if !col.shipyard {
+            ui.label(dim("The colony has no shipyard. It is the crowning building (Build tab): it needs a space dock, a Business Center and 250,000 colonists."));
+            return;
+        }
+        ui.label(dim(format!("Ships are built from the stockpile ({:.0} t) with colony labour, and join the fleet when launched.", col.materials)));
+        ui.label(dim("An ark built here takes 500 of this colony's people as settlers, with a share of the royal line if it lives here (never your heirs)."));
+        let designs: Vec<usize> = (0..STARTERS).chain(col.blueprints.iter().copied()).collect();
+        for idx in designs {
+            let s = &SHIPS[idx];
+            let p = Project::Ship(idx);
+            let (t, ly) = p.cost();
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(s.name).strong());
+                    ui.label(dim(format!("{t:.0} t · {ly:.0} labour-years")));
+                });
+                ui.label(dim(ship_line(s)));
+                match col.can_build(p) {
+                    Ok(()) => {
+                        if ui.button("Build").clicked() {
+                            acts.push(Action::Build(p));
+                        }
+                    }
+                    Err(e) => {
+                        ui.label(dim(e));
+                    }
+                }
+            });
+        }
+        ui.add_space(6.0);
+        section(ui, "BLUEPRINTS FOR SALE");
+        let mut any = false;
+        for (idx, s) in SHIPS.iter().enumerate().skip(STARTERS) {
+            if col.blueprints.contains(&idx) {
+                continue;
+            }
+            any = true;
+            let price = s.blueprint_price() * sim.background.buy_mult();
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(s.name).strong());
+                ui.label(dim(s.blurb));
+                ui.label(dim(ship_line(s)));
+                if ui.add_enabled(sim.credits >= price, egui::Button::new(format!("Buy blueprints ({price:.0} cr)"))).clicked() {
+                    acts.push(Action::BuyBlueprint(idx));
+                }
+            });
+        }
+        if !any {
+            ui.label(dim("You own every design on the market."));
+        }
+    });
 }
 
 fn stat(ui: &mut Ui, k: &str, frac: f64, label: String, tip: &str) {
@@ -230,10 +397,6 @@ fn overview(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Ve
         ui.label(dim("Workers"));
         ui.label(format!("{} (labour {:.0}%)", fmt_pop(col.ind.workers), col.ind.labour_eff * col.ind.power_eff * 100.0));
         ui.end_row();
-        ui.label(dim("Materials"));
-        let net = col.ind.materials_net_y;
-        ui.label(RichText::new(format!("{:.0} t  ({}{:.0} t/yr)", col.materials, if net >= 0.0 { "+" } else { "" }, net)).color(if net >= 0.0 { TEXT } else { BAD }));
-        ui.end_row();
         let y = &col.census.last_year;
         ui.label(dim("Last year"));
         ui.label(format!("{} born · {} died", fmt_pop(y.births), fmt_pop(y.deaths)));
@@ -248,6 +411,32 @@ fn overview(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Ve
             ui.label(format!("{:.1}%  · deaths in childbirth {:.2}%", y.infant_deaths / y.births * 100.0, y.maternal_deaths / y.births * 100.0));
             ui.end_row();
         }
+    });
+    ui.add_space(6.0);
+    section(ui, "MATERIALS");
+    egui::Grid::new("col_mat").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
+        let i = &col.ind;
+        ui.label(dim("Stockpile"));
+        ui.label(RichText::new(format!("{:.0} t", col.materials)).strong().color(KEY));
+        ui.end_row();
+        ui.label(dim("Mined and hauled"))
+            .on_hover_text("Colonists dig by hand; Resource Drones dig far more. A rich world and higher tech yield more.");
+        ui.label(rate_text(i.materials_made_y));
+        ui.end_row();
+        ui.label(dim("Upkeep")).on_hover_text("Everyday wear and use, per colonist. Short recyclers make it worse; Rationing makes it lighter.");
+        ui.label(rate_text(-i.materials_upkeep_y));
+        ui.end_row();
+        ui.label(dim("Construction")).on_hover_text("What the project being built draws (Build tab).");
+        ui.label(rate_text(-i.materials_build_y));
+        ui.end_row();
+        if col.pmp > 0 {
+            ui.label(dim("Manufacturing plant")).on_hover_text("Supplies the plant made from raw materials last year.");
+            ui.label(rate_text(-col.plant_spent_t));
+            ui.end_row();
+        }
+        ui.label(RichText::new("Net").strong());
+        ui.label(rate_text(col.materials_trend_y()).strong());
+        ui.end_row();
     });
     ui.add_space(6.0);
     history_chart(ui, col);
@@ -272,10 +461,12 @@ fn overview(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Ve
 fn laws(ui: &mut Ui, col: &PlayerColony, acts: &mut Vec<Action>) {
     use crate::sim::colony::law::{self, Law};
     let cost = Law::cost_t(col.population());
-    ui.label(dim(format!(
-        "Laws trade one thing for another. Enacting one costs {cost:.0} t of materials (stockpile {:.0} t); a law stands for at least a year before it can be repealed. Repealing is free.",
-        col.materials
-    )));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(format!("Enacting costs {cost:.0} t")).strong());
+        ui.label(dim("· stockpile"));
+        ui.label(RichText::new(format!("{:.0} t", col.materials)).strong().color(if col.materials >= cost { GOOD } else { BAD }));
+    });
+    ui.label(dim("Laws trade one thing for another. A law stands for at least a year before it can be repealed. Repealing is free."));
     ui.add_space(4.0);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for l in Law::ALL {
@@ -376,7 +567,7 @@ fn supplies(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) 
                 continue;
             }
             let have = col.units(g);
-            let need = g.units_for(pop);
+            let need = col.units_for(g, pop);
             ui.label(RichText::new(g.name()).color(ACCENT)).on_hover_text(g.desc());
             ui.label(format!("{have} / {need}"));
             let cov = col.ind.coverage.get(&g).copied().unwrap_or(0.0);
@@ -391,6 +582,13 @@ fn supplies(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) 
     }
     if col.hab.needs_domes() {
         ui.label(dim(format!("Shelter: {} Bio-Domes (10,000 each) + temporary domes (25 each). {:.0}% sheltered.", col.biodomes, col.ind.sheltered * 100.0)));
+    }
+    if col.drone_lvl > 0 {
+        ui.label(dim(format!("Resource Drones refitted: each unit serves {:.0} colonists (+{}%).", col.per(Good::ResDrones), 10 * col.drone_lvl)));
+    }
+    let boons = col.boons.lines();
+    if !boons.is_empty() {
+        ui.label(dim(format!("Gifts from artifact deliveries: {}.", boons.join(", "))));
     }
     if col.hybrid {
         ui.label(if col.gene_kit { dim("Genetic Modification Kit: installed.") } else { RichText::new("Genetic Modification Kit: missing.").color(WARN) });
@@ -471,7 +669,7 @@ fn census(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) {
         if ui.button("Oldest colonist").clicked() {
             acts.push(Action::OldestColonist);
         }
-        if ui.button("Your family").clicked() {
+        if ui.button(if col.outpost { "The leader" } else { "Your family" }).clicked() {
             acts.push(Action::ViewPerson(col.player));
         }
     });
@@ -528,12 +726,14 @@ fn person_button(ui: &mut Ui, col: &PlayerColony, id: u32, now: f64, acts: &mut 
     let c = &col.census;
     let Some(p) = c.get(id) else { return };
     let sym = if p.female { "♀" } else { "♂" };
-    let status = match p.died {
-        Some(d) => format!("†{:.0}", (d - p.born).floor()),
-        None => format!("{:.0}", p.age(now).floor()),
+    let gone = c.emigrated.get(&id).copied();
+    let status = match (p.died, gone) {
+        (Some(d), _) => format!("†{:.0}", (d - p.born).floor()),
+        (None, Some(_)) => "emigrated".to_string(),
+        (None, None) => format!("{:.0}", p.age(now).floor()),
     };
-    let me = if id == col.player { " (you)" } else { "" };
-    let text = RichText::new(format!("{sym} {}{me}  {status}", c.name(id))).color(if p.alive() { TEXT } else { DIM });
+    let me = if id == col.player { if col.outpost { " (leader)" } else { " (you)" } } else { "" };
+    let text = RichText::new(format!("{sym} {}{me}  {status}", c.name(id))).color(if c.here(id) { TEXT } else { DIM });
     if ui.button(text).clicked() {
         acts.push(Action::ViewPerson(id));
     }
@@ -558,9 +758,10 @@ fn family(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Vec<
     ui.add_space(4.0);
     ui.label(RichText::new(c.name(id)).strong().size(19.0).color(if id == col.player { KEY } else { ACCENT }));
     let born = fmt_date(p.born as f64 * crate::sim::people::SECS_PER_YEAR);
-    let life = match p.died {
-        Some(d) => format!("born {born}, died {} aged {:.0}", fmt_date(d as f64 * crate::sim::people::SECS_PER_YEAR), (d - p.born).floor()),
-        None => format!("born {born}, age {:.0}", p.age(now).floor()),
+    let life = match (p.died, c.emigrated.get(&id)) {
+        (Some(d), _) => format!("born {born}, died {} aged {:.0}", fmt_date(d as f64 * crate::sim::people::SECS_PER_YEAR), (d - p.born).floor()),
+        (None, Some(&left)) => format!("born {born}, left on a colony ark {} aged {:.0}", fmt_date(left as f64 * crate::sim::people::SECS_PER_YEAR), (left - p.born).floor()),
+        (None, None) => format!("born {born}, age {:.0}", p.age(now).floor()),
     };
     ui.label(format!("{} · {life}", if p.female { "Female" } else { "Male" }));
     let origin = match p.origin {
@@ -625,7 +826,34 @@ fn market(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Vec<
         }
     });
     section(ui, "VISITING MERCHANTS");
-    ui.label(dim(format!("Buys {} units per click (set on the Trade screen's Cargo tab). Deliveries go straight into the colony.", app.cargo_qty)));
+    ui.label(dim(format!("Buys {} units per click (set on the Trade screen's Cargo tab). Stock comes back over the weeks, like any port.", app.cargo_qty)));
+    if col.pmp > 0 {
+        ui.label(dim(format!(
+            "Your {} manufacturing {} the dock from the stockpile (1.5 t of materials per tonne made), and sell for less.",
+            col.pmp,
+            if col.pmp == 1 { "plant restocks" } else { "plants restock" }
+        )));
+    }
+    // Docked at the colony shown (the GUI does not swap it in).
+    let docked = !sim.ship_dormant && sim.trip.is_none() && sim.shuttle.is_none() && sim.sys_id == col.sys_id && sim.loc == col.loc;
+    let to_ship = app.dock_to_ship && docked;
+    ui.horizontal(|ui| {
+        ui.label("Deliver to:");
+        if ui.selectable_label(!to_ship, "Colony").on_hover_text("Supplies go straight into the colony's stores.").clicked() {
+            acts.push(Action::DockToShip(false));
+        }
+        let ship = sim.ship().name;
+        let r = ui
+            .add_enabled(docked, egui::Button::selectable(to_ship, format!("{ship} hold")))
+            .on_hover_text("Load supplies into the ship's cargo hold, to carry them to another world.")
+            .on_disabled_hover_text(format!("Dock the ship at {} to load it here.", col.world));
+        if r.clicked() {
+            acts.push(Action::DockToShip(true));
+        }
+    });
+    if to_ship {
+        ui.label(dim(format!("Hold: {:.0} / {:.0} t", sim.hold.mass_t(), sim.ship().cargo_t)));
+    }
     let Some(m) = &col.market else { return };
     egui::Grid::new("dock_mkt").num_columns(4).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
         for (g, o) in &m.offers {
@@ -643,7 +871,12 @@ fn market(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Vec<
 /// Founding: shown on the Planets screen for the body the ship is docked at.
 pub fn founding(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     let sim = app.sim();
-    if sim.colony.is_some() {
+    // With a colony already, only Hegemony lets you found more (the plan
+    // explains why not, once the law is in force).
+    if sim.colony.is_some() && !sim.hegemony() {
+        return;
+    }
+    if sim.all_colonies().any(|c| c.sys_id == sim.sys_id && c.loc == sim.loc) {
         return;
     }
     let sys = app.gal.system_ref(sim.sys_id);
@@ -672,7 +905,11 @@ pub fn founding(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             for w in &plan.warnings {
                 ui.label(RichText::new(w).color(if hab == Hab::Lethal { BAD } else { WARN }));
             }
-            ui.label(dim("Your crew settle for good and the ship is mothballed. You can leave to fly for supplies, but you can only ever keep one colony."));
+            if sim.colony.is_some() {
+                ui.label(dim("Under Hegemony: the ship's crew and passengers settle here for good. You, your partner and your pilot stay aboard and fly on."));
+            } else {
+                ui.label(dim("Your crew settle for good and the ship is mothballed. You can leave to fly for supplies. Only under the Hegemony law can you found more colonies."));
+            }
             let label = if app.confirm_found { "Confirm: found the colony" } else { "Found colony" };
             if ui.add(egui::Button::new(RichText::new(label).strong().color(GOOD))).clicked() {
                 acts.push(Action::FoundColony);
@@ -705,6 +942,16 @@ pub fn victory(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) 
                 .clicked()
             {
                 acts.push(Action::VictoryAbandon);
+            }
+            ui.add_space(6.0);
+            let hegemony = col.laws.iter().any(|e| e.law == crate::sim::colony::law::Law::Hegemony);
+            if ui
+                .add_enabled(hegemony, egui::Button::new(RichText::new("Continue the Royal Lineage").size(16.0).color(KEY)).min_size(vec2(300.0, 34.0)))
+                .on_hover_text("Keep your colony and play on: your house rules, generation after generation.")
+                .on_disabled_hover_text("Only a colony under the Hegemony law can rule on past a million.")
+                .clicked()
+            {
+                acts.push(Action::ContinueLineage);
             }
         });
     });

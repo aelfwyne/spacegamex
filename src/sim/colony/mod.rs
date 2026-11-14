@@ -16,7 +16,7 @@ use super::people::{years, HOURS_PER_YEAR};
 use super::planet::{Colony, ColonyTech};
 use super::res::Res;
 use super::state::{loc_label, Loc, Sim};
-use census::{Census, Event, Origin, Person, Rates, ADULT};
+use census::{Census, Emigrant, Event, Origin, Person, Rates, ADULT};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -38,6 +38,32 @@ pub struct Batch {
     pub until: f64,
 }
 
+/// Of `batches`, the `need` units nearest wearing out are in use and age;
+/// the rest sit idle in store, so their wear-out date moves on by `dt`.
+fn idle_keep(batches: &mut Vec<Batch>, need: u32, dt: f64) {
+    batches.sort_by(|a, b| a.until.total_cmp(&b.until));
+    let mut left = need;
+    let mut out: Vec<Batch> = Vec::with_capacity(batches.len() + 1);
+    for b in batches.drain(..) {
+        let used = b.units.min(left);
+        left -= used;
+        if used > 0 {
+            out.push(Batch { units: used, until: b.until });
+        }
+        if b.units > used {
+            out.push(Batch { units: b.units - used, until: b.until + dt });
+        }
+    }
+    // Merge batches that wear out together.
+    out.sort_by(|a, b| a.until.total_cmp(&b.until));
+    for b in out {
+        match batches.last_mut() {
+            Some(l) if (l.until - b.until).abs() < 1e-6 => l.units += b.units,
+            _ => batches.push(b),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Project {
     /// Programmable Manufacturing Plant: makes supplies from raw materials.
@@ -45,10 +71,20 @@ pub enum Project {
     BioDome,
     SpaceDock,
     Business,
+    /// The colony's crowning work: builds ships.
+    Shipyard,
+    /// A ship on the shipyard's slip (index into `SHIPS`).
+    Ship(usize),
 }
 
+/// Colonists a shipyard needs.
+pub const SHIPYARD_POP: f64 = 250_000.0;
+/// Ships the shipyard can have on its slips at once.
+pub const HANGAR_CAP: usize = 3;
+
 impl Project {
-    pub const ALL: [Project; 4] = [Project::Pmp, Project::BioDome, Project::SpaceDock, Project::Business];
+    /// The buildings (ships are listed by the shipyard).
+    pub const ALL: [Project; 5] = [Project::Pmp, Project::BioDome, Project::SpaceDock, Project::Business, Project::Shipyard];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -56,15 +92,19 @@ impl Project {
             Project::BioDome => "Bio-Dome",
             Project::SpaceDock => "Space Dock",
             Project::Business => "Business Center",
+            Project::Shipyard => "Shipyard",
+            Project::Ship(i) => crate::sim::ShipSpec::spec(i).name,
         }
     }
 
     pub fn desc(self) -> &'static str {
         match self {
-            Project::Pmp => "Builds every colony supply from raw materials, replacing worn-out kits and equipping new colonists, for up to 10,000 people. Ends the need to import supplies.",
+            Project::Pmp => "Builds every colony supply from raw materials, replacing worn-out kits and equipping new colonists, for up to 10,000 people. Ends the need to import supplies. With a space dock, each plant also keeps supplies for 1,000 more colonists on sale there.",
             Project::BioDome => "A permanent habitat for 10,000 colonists on a world they cannot live on unprotected.",
             Project::SpaceDock => "Brings visiting merchants: sell the colony's materials and buy supplies without leaving. Needs 100,000 colonists.",
             Project::Business => "Improves the economy: better prices and stock at the space dock, and a higher standard of living.",
+            Project::Shipyard => "The colony's crowning work: slips and foundries that build ships from the stockpile — any of the three founding designs, and others once you buy their blueprints. Needs a space dock, a Business Center and 250,000 colonists.",
+            Project::Ship(i) => crate::sim::ShipSpec::spec(i).blurb,
         }
     }
 
@@ -75,6 +115,8 @@ impl Project {
             Project::BioDome => (400.0, 150.0),
             Project::SpaceDock => (8_000.0, 4_000.0),
             Project::Business => (2_000.0, 800.0),
+            Project::Shipyard => (20_000.0, 8_000.0),
+            Project::Ship(i) => crate::sim::ShipSpec::spec(i).build_cost(),
         }
     }
 }
@@ -106,6 +148,14 @@ pub struct Indicators {
     /// gathering, farming) where hydroponics fall short.
     #[serde(default)]
     pub forage: f64,
+    /// Materials flows (t/yr): dug and hauled, consumed by upkeep, and
+    /// drawn by construction (at last month's rate).
+    #[serde(default)]
+    pub materials_made_y: f64,
+    #[serde(default)]
+    pub materials_upkeep_y: f64,
+    #[serde(default)]
+    pub materials_build_y: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,8 +198,12 @@ pub struct PlayerColony {
     /// (year, population), once a year.
     pub history: Vec<[f32; 2]>,
     pub won: bool,
-    /// The space dock's merchants.
+    /// The space dock's merchants. Its `stocked_t` is in game years.
     pub market: Option<CargoMarket>,
+    /// The dock's usual stock per good (merchants' plus the plants'
+    /// export share): it restocks toward this over time.
+    #[serde(default)]
+    pub dock_usual: BTreeMap<Good, u32>,
     #[serde(default)]
     pub ind: Indicators,
     /// Laws in force.
@@ -163,14 +217,152 @@ pub struct PlayerColony {
     pub births_total: f64,
     #[serde(default)]
     pub deaths_total: f64,
+    /// The colony has built its shipyard.
+    #[serde(default)]
+    pub shipyard: bool,
+    /// Ship designs (indices into `SHIPS`) whose plans have been bought.
+    #[serde(default)]
+    pub blueprints: Vec<usize>,
+    /// A further colony founded under Hegemony by settlers alone (the
+    /// captain's family lives at the capital, `Sim::colony`).
+    #[serde(default)]
+    pub outpost: bool,
+    /// Materials the manufacturing plant used last year (t).
+    #[serde(default)]
+    pub plant_spent_t: f64,
+    /// Ships just launched, not yet handed to the captain's fleet.
+    #[serde(default)]
+    pub hangar: Vec<usize>,
+    /// Resource Drones refits from quest rewards: each level lets a unit
+    /// serve 10% more colonists.
+    #[serde(default)]
+    pub drone_lvl: u8,
+    /// Small permanent gains from quest rewards.
+    #[serde(default)]
+    pub boons: Boons,
+}
+
+/// Highest Resource Drones refit level.
+pub const MAX_DRONE_LVL: u8 = 5;
+
+/// Permanent +1% gains a colony earns from quest rewards, one count each.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Boons {
+    pub produce: u8,
+    pub health: u8,
+    pub tech: u8,
+    pub fert: u8,
+}
+
+impl Boons {
+    pub fn apply(&self, f: &mut law::LawFx) {
+        f.produce *= 1.0 + 0.01 * self.produce as f64;
+        f.health += 0.01 * self.health as f64;
+        f.tech_growth *= 1.0 + 0.01 * self.tech as f64;
+        f.fert *= 1.0 + 0.01 * self.fert as f64;
+    }
+
+    /// Grant one at random; returns what it was.
+    pub fn grant(&mut self, pick: usize) -> &'static str {
+        match pick % 4 {
+            0 => {
+                self.produce += 1;
+                "materials output +1%"
+            }
+            1 => {
+                self.health += 1;
+                "colony health +1%"
+            }
+            2 => {
+                self.tech += 1;
+                "tech growth +1%"
+            }
+            _ => {
+                self.fert += 1;
+                "birth rate +1%"
+            }
+        }
+    }
+
+    /// One line per boon held, for the colony screen.
+    pub fn lines(&self) -> Vec<String> {
+        [(self.produce, "materials output"), (self.health, "health"), (self.tech, "tech growth"), (self.fert, "birth rate")]
+            .iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{what} +{n}%"))
+            .collect()
+    }
 }
 
 /// Something the colony wants to tell the captain.
 pub type Note = (Level, String);
 
 impl PlayerColony {
+    /// The captain and every descendant of theirs on record: the heirs,
+    /// who never leave the capital.
+    pub fn heirs(&self) -> std::collections::BTreeSet<u32> {
+        let mut out = std::collections::BTreeSet::new();
+        if self.outpost {
+            return out;
+        }
+        let mut stack = vec![self.player];
+        while let Some(x) = stack.pop() {
+            if out.insert(x) && out.len() < 100_000 {
+                stack.extend(self.census.children(x));
+            }
+        }
+        out
+    }
+
+    /// Draw `n` settlers for an ark this colony built: anyone may go
+    /// (colonists' descendants or not), and a share of the royal line if
+    /// it is here, but never the captain's heirs. Returns the settlers.
+    pub fn ark_settlers(&mut self, n: usize, now: f64) -> Vec<Emigrant> {
+        let n = n.min((self.population() - 100.0).max(0.0) as usize);
+        let keep = self.heirs();
+        let mut royals: Vec<u32> = self
+            .census
+            .living
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let p = &self.census.people[i as usize];
+                p.line && !keep.contains(&i) && (16.0..60.0).contains(&p.age(now))
+            })
+            .collect();
+        // A quarter of the royal line present, at least one, at most a
+        // tenth of the ark.
+        let want = royals.len().div_ceil(4).min(n / 10);
+        let mut rng = crate::rngx::derive(self.census.seed ^ 0xa5_c0, (now * 12.0) as u64);
+        for k in (1..royals.len()).rev() {
+            royals.swap(k, rng.random_range(0..=k));
+        }
+        royals.truncate(want);
+        self.census.emigrate(&royals, n, &keep, now)
+    }
+
+    /// Net change of the stockpile per year, everything counted: what is
+    /// dug, less upkeep, construction and the plant's yearly draw.
+    pub fn materials_trend_y(&self) -> f64 {
+        self.ind.materials_made_y - self.ind.materials_upkeep_y - self.ind.materials_build_y - self.plant_spent_t
+    }
+
     pub fn population(&self) -> f64 {
         self.census.population()
+    }
+
+    /// Colonists one unit of supply `g` serves here.
+    pub fn per(&self, g: Good) -> f64 {
+        let base = g.supply().map(|x| x.per).unwrap_or(1.0);
+        if g == Good::ResDrones { base * (1.0 + 0.1 * self.drone_lvl as f64) } else { base }
+    }
+
+    /// Units of `g` needed to serve `colonists` fully here.
+    pub fn units_for(&self, g: Good, colonists: f64) -> u32 {
+        if g.supply().is_none() {
+            return 0;
+        }
+        (colonists / self.per(g)).ceil().max(0.0) as u32
     }
 
     pub fn units(&self, g: Good) -> u32 {
@@ -224,6 +416,20 @@ impl PlayerColony {
             Project::SpaceDock if self.dock || queued > 0 => Err("The colony already has its space dock.".into()),
             Project::SpaceDock if pop < 100_000.0 => Err("A space dock needs 100,000 colonists.".into()),
             Project::Business if self.business || queued > 0 => Err("The colony already has its Business Center.".into()),
+            Project::Shipyard if self.shipyard || queued > 0 => Err("The colony already has its shipyard.".into()),
+            Project::Shipyard if !self.dock || !self.business => Err("A shipyard needs a space dock and a Business Center first.".into()),
+            Project::Shipyard if pop < SHIPYARD_POP => Err("A shipyard needs 250,000 colonists.".into()),
+            Project::Ship(_) if !self.shipyard => Err("Ships are built at a shipyard.".into()),
+            Project::Ship(i) if i >= crate::sim::SHIPS.len() => Err("No such design.".into()),
+            Project::Ship(i) if i >= crate::sim::STARTERS && !self.blueprints.contains(&i) => Err("Buy the blueprints first.".into()),
+            Project::Ship(_) => {
+                let slips = self.queue.iter().filter(|c| matches!(c.kind, Project::Ship(_))).count();
+                if slips >= HANGAR_CAP {
+                    Err(format!("The shipyard has {HANGAR_CAP} slips, all in use."))
+                } else {
+                    Ok(())
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -239,6 +445,7 @@ impl PlayerColony {
             self.step_month(player_home, boost, notes);
             steps += 1;
         }
+        self.restock_dock(now);
     }
 
     fn step_month(&mut self, player_home: bool, (tech_boost, health_boost): (f64, f64), notes: &mut Vec<Note>) {
@@ -247,6 +454,15 @@ impl PlayerColony {
         let pop = self.population().max(1.0);
 
         // ---- supplies wear out ----
+        // Only kits in use wear: the colony draws on those nearest the end
+        // of their life first, and spares in the store keep.
+        let dome_need = if self.hab.needs_domes() { (pop - self.biodomes as f64 * 10_000.0).max(0.0) } else { 0.0 };
+        let needs: Vec<(Good, u32)> = self.supplies.keys().map(|&g| (g, self.units_for(g, if g == Good::HazardDome { dome_need } else { pop }))).collect();
+        for (g, need) in needs {
+            if let Some(batches) = self.supplies.get_mut(&g) {
+                idle_keep(batches, need, dt);
+            }
+        }
         for (g, batches) in self.supplies.iter_mut() {
             let worn: u32 = batches.iter().filter(|b| b.until <= now).map(|b| b.units).sum();
             if worn > 0 {
@@ -255,8 +471,7 @@ impl PlayerColony {
             }
         }
         let cov = |g: Good, s: &Self| -> f64 {
-            let per = g.supply().map(|x| x.per).unwrap_or(1.0);
-            (s.units(g) as f64 * per / pop).min(1.0)
+            (s.units(g) as f64 * s.per(g) / pop).min(1.0)
         };
         let power = cov(Good::PowerGen, self);
         let eff = 0.25 + 0.75 * power;
@@ -277,7 +492,8 @@ impl PlayerColony {
         // small colony at once; fields take a few years to clear and plant
         // but then feed any number. Either way it is hard, slow labour
         // (`toil`), and a hostile world gives nothing outside the domes.
-        let fx = law::effects(&self.laws);
+        let mut fx = law::effects(&self.laws);
+        self.boons.apply(&mut fx);
         let land = match self.hab {
             Hab::Habitable => 1.0,
             Hab::Marginal => 0.6,
@@ -413,6 +629,7 @@ impl PlayerColony {
         // ---- construction ----
         let workers = self.census.workers(now) * fx.workers;
         let labour = workers * 0.25 * labour_eff * eff * fx.build * dt;
+        let mut built_t = 0.0;
         if let Some(c) = self.queue.first_mut() {
             let (mat_t, lab_y) = c.kind.cost();
             let mut frac = labour / lab_y;
@@ -422,6 +639,7 @@ impl PlayerColony {
             }
             frac = frac.min(1.0 - c.done);
             self.materials -= frac * mat_t;
+            built_t = frac * mat_t;
             c.done += frac;
             if c.done >= 1.0 - 1e-9 {
                 let kind = c.kind;
@@ -431,8 +649,14 @@ impl PlayerColony {
                     Project::BioDome => self.biodomes += 1,
                     Project::SpaceDock => self.dock = true,
                     Project::Business => self.business = true,
+                    Project::Shipyard => self.shipyard = true,
+                    Project::Ship(i) => self.hangar.push(i),
                 }
-                notes.push((Level::Good, format!("Construction complete: {}.", kind.name())));
+                if let Project::Ship(_) = kind {
+                    notes.push((Level::Good, format!("The shipyard has launched a new {}. It joins your fleet at the colony.", kind.name())));
+                } else {
+                    notes.push((Level::Good, format!("Construction complete: {}.", kind.name())));
+                }
                 if self.dock {
                     self.refresh_market();
                 }
@@ -447,6 +671,9 @@ impl PlayerColony {
             genetic,
             shortage,
             materials_net_y: produce - upkeep,
+            materials_made_y: produce,
+            materials_upkeep_y: upkeep,
+            materials_build_y: built_t / dt,
             workers,
             rates_mort: rates.mort_mult,
             rates_fert: rates.fert,
@@ -469,11 +696,12 @@ impl PlayerColony {
         if self.pmp > 0 {
             let served = pop.min(self.pmp as f64 * 10_000.0);
             let mut made = 0;
+            let before = self.materials;
             for g in Good::SUPPLIES {
                 if g == Good::HazardDome && (!self.hab.needs_domes() || self.biodomes as f64 * 10_000.0 >= served) {
                     continue;
                 }
-                let target = g.units_for(served);
+                let target = self.units_for(g, served);
                 let have = self.units(g);
                 if target > have {
                     let cost = g.mass_t() * 1.5;
@@ -485,6 +713,7 @@ impl PlayerColony {
                     }
                 }
             }
+            self.plant_spent_t = before - self.materials;
             if made > 0 && self.materials < 1.0 {
                 notes.push((Level::Warn, "The manufacturing plant ran out of raw materials.".into()));
             }
@@ -504,7 +733,7 @@ impl PlayerColony {
         if self.dock {
             self.refresh_market();
         }
-        if !self.won && pop >= WIN_POP {
+        if !self.won && !self.outpost && pop >= WIN_POP {
             self.won = true;
             notes.push((Level::Good, format!("{} has reached a million people. You have won!", self.name)));
         }
@@ -513,17 +742,90 @@ impl PlayerColony {
         }
     }
 
-    /// Restock the space dock's visiting merchants (yearly).
+    /// Units of `g` the manufacturing plants keep at the dock for sale:
+    /// each plant stocks enough to equip 1,000 more colonists.
+    pub fn plant_stock(&self, g: Good) -> u32 {
+        if self.pmp == 0 || g.supply().is_none() {
+            return 0;
+        }
+        g.units_for(self.pmp as f64 * 1_000.0)
+    }
+
+    /// New prices and usual stock for the space dock (yearly, and when
+    /// something is built). What is on the shelves stays; a new dock
+    /// opens fully stocked.
     pub fn refresh_market(&mut self) {
-        let mut offers = BTreeMap::new();
         let mut rng = crate::rngx::derive(self.census.seed ^ 0x0d_0c4, (self.clock * 12.0) as u64);
         let k = if self.business { 2.0 } else { 1.0 };
+        let fresh = self.market.is_none();
+        let old = self.market.take().unwrap_or_default();
+        let mut offers = BTreeMap::new();
+        self.dock_usual.clear();
         for g in Good::SUPPLIES.iter().copied().chain([Good::GeneKit]) {
-            let price = g.base_price() * if self.business { 0.95 } else { 1.15 } * rng.random_range(0.9..1.15);
-            let stock = (g.units_for(self.population() * 0.05).max(2) as f64 * k * rng.random_range(0.4..1.2)).round() as u32;
-            offers.insert(g, Offer { price, stock, sells: rng.random_bool(0.85), buys: false });
+            let plant = self.plant_stock(g);
+            // Home-made supplies skip the merchants' freight.
+            let local = if plant > 0 { 0.9 } else { 1.0 };
+            let price = g.base_price() * if self.business { 0.95 } else { 1.15 } * local * rng.random_range(0.9..1.15);
+            let merchants = (g.units_for(self.population() * 0.05).max(2) as f64 * k * rng.random_range(0.4..1.2)).round() as u32;
+            let visit = rng.random_bool(0.85);
+            let usual = if visit { merchants } else { 0 } + plant;
+            let stock = if fresh { usual } else { old.offers.get(&g).map_or(0, |o| o.stock) };
+            offers.insert(g, Offer { price, stock, sells: usual > 0 || stock > 0, buys: false });
+            self.dock_usual.insert(g, usual);
         }
-        self.market = Some(CargoMarket { offers });
+        let stocked_t = if fresh { self.clock } else { old.stocked_t };
+        self.market = Some(CargoMarket { offers, stocked_t });
+    }
+
+    /// Top the dock back up toward its usual stock, like any port: about
+    /// two thirds of a shortfall returns within a month. The plants' share
+    /// is made from the stockpile (as when they equip colonists); the
+    /// merchants bring the rest.
+    pub fn restock_dock(&mut self, now: f64) {
+        if !self.dock {
+            return;
+        }
+        if self.market.is_none() || self.dock_usual.is_empty() {
+            self.refresh_market();
+        }
+        let since = self.market.as_ref().map_or(now, |m| m.stocked_t);
+        let days = (now - since) * crate::sim::people::DAYS_PER_YEAR;
+        if days < 1.0 {
+            return;
+        }
+        let k = 1.0 - (-days / crate::sim::cargo::RESTOCK_DAYS).exp();
+        let goods: Vec<Good> = self.dock_usual.keys().copied().collect();
+        let mut changed = false;
+        let mut short = false;
+        for g in goods {
+            let usual = self.dock_usual[&g];
+            let plant = self.plant_stock(g).min(usual);
+            let m = self.market.as_mut().unwrap();
+            let Some(o) = m.offers.get_mut(&g) else { continue };
+            if o.stock >= usual {
+                continue;
+            }
+            let mut add = ((usual - o.stock) as f64 * k).floor() as u32;
+            // The plants' part of the restock, paid in materials.
+            let made = ((add as f64 * plant as f64 / usual.max(1) as f64).round() as u32).min(add);
+            let cost = g.mass_t() * 1.5;
+            let can = (self.materials / cost).floor() as u32;
+            if made > can {
+                add -= made - can;
+            }
+            self.materials -= made.min(can) as f64 * cost;
+            if add > 0 {
+                o.stock += add;
+                o.sells = true;
+                changed = true;
+            }
+            short |= o.stock < usual;
+        }
+        // Nothing grew (small shortfalls, short waits): keep counting from
+        // the same moment so the time is not lost.
+        if changed || !short {
+            self.market.as_mut().unwrap().stocked_t = now;
+        }
     }
 
     /// What a tonne of the stockpile fetches at the dock.
@@ -590,8 +892,14 @@ pub struct FoundingPlan {
 impl Sim {
     /// Why a colony cannot be founded here, or the plan if it can.
     pub fn founding_plan(&self, gal: &Galaxy) -> Result<FoundingPlan, String> {
-        if self.colony.is_some() {
-            return Err("You already have a colony. You can only keep one.".into());
+        let outpost = self.colony.is_some();
+        if outpost {
+            if !self.hegemony() {
+                return Err("You already have a colony. Only under the Hegemony law (enacted at your capital) can you found more.".into());
+            }
+            if self.all_colonies().any(|c| c.sys_id == self.sys_id && c.loc == self.loc) {
+                return Err("You already have a colony here.".into());
+            }
         }
         if self.trip.is_some() || self.shuttle.is_some() {
             return Err("Dock at the world first.".into());
@@ -603,13 +911,23 @@ impl Sim {
         let Some(p) = sys.site(self.loc) else { return Err("No world here.".into()) };
         world::colonizable(p).map_err(|e| e.to_string())?;
         let spec = &self.ship();
-        let pilot = self.pilot.is_some() as usize;
-        let colonists = (self.crew.count - pilot + self.pax.count) as u32;
+        let colonists = if outpost {
+            // Your family stays at the capital: only the ship's company
+            // and passengers settle.
+            (self.crew.count.saturating_sub(self.own_party().len()) + self.pax.count) as u32
+        } else {
+            let pilot = self.pilot.is_some() as usize;
+            (self.crew.count - pilot + self.pax.count) as u32
+        };
         if colonists < 2 {
-            return Err("A colony needs at least a couple: recruit a partner at a port first.".into());
+            return Err(if outpost {
+                "A further colony needs settlers: your family stays at the capital. Bring crew or passengers (an Ark carries 500).".into()
+            } else {
+                "A colony needs at least a couple: recruit a partner at a port first.".into()
+            });
         }
         let hab = world::habitability(p);
-        let hybrid = self.spouse.as_ref().is_some_and(|s| s.species.is_some());
+        let hybrid = !outpost && self.spouse.as_ref().is_some_and(|s| s.species.is_some());
         let gene_kit = self.hold.get(Good::GeneKit) > 0;
         let mut kit = Vec::new();
         let mut warnings = Vec::new();
@@ -631,6 +949,12 @@ impl Sim {
         if hybrid && !gene_kit {
             warnings.push("Your partner is a native: without a Genetic Modification Kit you cannot have children together.".into());
         }
+        if outpost {
+            warnings.push(format!(
+                "Your family stays at {}: these {colonists} settlers found the colony without you, and the ship flies on.",
+                self.colony.as_ref().map(|c| c.name.as_str()).unwrap_or("the capital")
+            ));
+        }
         if spec.crew == 1 && colonists == 2 {
             warnings.push("Two founders: the colony starts far below the galactic tech level and needs near-ideal conditions.".into());
         }
@@ -651,8 +975,9 @@ impl Sim {
         let seed = crate::rngx::mix64(self.seed ^ self.sys_id ^ (self.t as u64));
         let mut rng = crate::rngx::derive(seed, 0xf0_0d);
         let mut census = Census::new(seed, now);
-        // The captain.
-        let player = census.add(Person {
+        let outpost = self.colony.is_some();
+        // The captain (and partner) found only the first colony.
+        let player = (!outpost).then(|| census.add(Person {
             female: self.player_sex.is_female(),
             born: self.player_birth_y as f32,
             died: None,
@@ -665,12 +990,14 @@ impl Sim {
             unseen: vec![],
             parents_unseen: false,
             line: true,
-        });
-        census.given.insert(player, self.player_given());
-        census.family.insert(player, self.player_surname());
-        census.people[player as usize].line = true;
+        }));
+        if let Some(player) = player {
+            census.given.insert(player, self.player_given());
+            census.family.insert(player, self.player_surname());
+            census.people[player as usize].line = true;
+        }
         let mut spouse_id = None;
-        if let Some(sp) = &self.spouse {
+        if let (Some(player), Some(sp)) = (player, self.spouse.as_ref().filter(|_| !outpost)) {
             let id = census.add(Person {
                 female: sp.sex.is_female(),
                 // Near the captain's age (both adults).
@@ -692,25 +1019,55 @@ impl Sim {
         }
         // The rest of the crew (not the pilot, who stays with the ship),
         // then the passengers. Sexes balance across the whole company.
-        let others: Vec<String> = self
-            .crew
-            .names
-            .iter()
-            .skip(1)
-            .filter(|n| self.spouse.as_ref().is_none_or(|s| &s.name != *n) && self.pilot.as_ref().is_none_or(|p| &p.name != *n))
-            .cloned()
-            .collect();
+        let own = self.own_party();
+        let others: Vec<String> = self.crew.names.iter().filter(|n| !own.contains(n)).cloned().collect();
         let total = plan.colonists as usize;
-        let mut females = census.people.iter().filter(|p| p.female).count();
-        let mut placed = census.people.len();
+        // Emigrants aboard (an ark from one of your colonies) found it as
+        // themselves. At a further colony the whole people are kept by age
+        // band, made individual only when looked at; the royal line (and
+        // any natives) stay on record.
+        let emigrants: Vec<Emigrant> = self.settlers.iter().take(self.pax.count).cloned().collect();
+        let mut leader = None;
+        for e in &emigrants {
+            if !outpost || e.royal || e.alien {
+                let id = census.add(Person {
+                    female: e.female,
+                    born: e.born,
+                    died: None,
+                    mother: None,
+                    father: None,
+                    spouse: None,
+                    alien: e.alien,
+                    origin: Origin::Founder,
+                    due: None,
+                    unseen: vec![],
+                    parents_unseen: false,
+                    line: e.royal,
+                });
+                census.given.insert(id, e.given.clone());
+                census.family.insert(id, e.family.clone());
+                if e.royal && leader.is_none() {
+                    leader = Some(id);
+                }
+            } else {
+                let age = ((now - e.born as f64).max(0.0) as usize).min(census::MAX_AGE);
+                census.cohorts[age][e.female as usize] += 1.0;
+            }
+        }
+        let mut females = census.people.iter().filter(|p| p.female).count() + census.cohorts.iter().map(|c| c[1]).sum::<f64>() as usize;
+        let mut placed = census.people.len() + census.cohort_total() as usize;
         let mut add = |census: &mut Census, given: Option<String>, rng: &mut crate::rngx::GameRng, age: f64| {
-            let remaining = total - placed;
+            let remaining = total.saturating_sub(placed);
             let want_f = (total / 2).saturating_sub(females);
             let female = if remaining > 0 { rng.random_range(0..remaining) < want_f } else { rng.random_bool(0.5) };
             if female {
                 females += 1;
             }
             placed += 1;
+            if outpost {
+                census.cohorts[(age as usize).min(census::MAX_AGE)][female as usize] += 1.0;
+                return;
+            }
             let id = census.add(Person {
                 female,
                 born: (now - age) as f32,
@@ -733,12 +1090,21 @@ impl Sim {
             let age = rng.random_range(22.0..46.0);
             add(&mut census, Some(n), &mut rng, age);
         }
-        for _ in 0..self.pax.count {
+        for _ in emigrants.len()..self.pax.count {
             let age = rng.random_range(16.0..48.0);
             add(&mut census, None, &mut rng, age);
         }
         census.yearly(now, false);
         census.last_year = Default::default();
+        if outpost {
+            census.demographic = true;
+        }
+        // A further colony's leader stands in for the captain on its
+        // screens: one of the royal line if any came, else a settler.
+        let player = player.or(leader).or_else(|| {
+            (30..50).flat_map(|a| [(a, false), (a, true)]).find_map(|(a, f)| census.materialize(a, f, now, false))
+        });
+        let player = player.or_else(|| census.living.first().copied()).unwrap_or(0);
 
         let n = plan.colonists as f64;
         let mut colony = PlayerColony {
@@ -772,16 +1138,46 @@ impl Sim {
             founder_bg: self.background,
             births_total: 0.0,
             deaths_total: 0.0,
+            shipyard: false,
+            outpost,
+            plant_spent_t: 0.0,
+            blueprints: vec![],
+            hangar: vec![],
+            drone_lvl: 0,
+            boons: Boons::default(),
             census,
             player,
             history: vec![[now as f32, n as f32]],
             won: false,
             market: None,
+            dock_usual: BTreeMap::new(),
             ind: Indicators::default(),
         };
         let _ = spouse_id;
         if plan.hybrid && plan.gene_kit {
             self.hold.take(Good::GeneKit, 1);
+        }
+        if outpost {
+            colony.name = format!("{} {}", colony.name, ["II", "III", "IV", "V", "VI", "VII", "VIII", "IX"][self.outposts.len().min(7)]);
+            let name = colony.name.clone();
+            let n_out = self.outposts.len() + 1;
+            self.outposts.push(colony);
+            // Unload into it (the swap points `colony` at the new one).
+            self.swap_colony(n_out);
+            self.unload_to_colony();
+            self.swap_colony(n_out);
+            let own = self.own_party();
+            self.crew.names.retain(|n| own.contains(n));
+            self.crew.count = self.crew.names.len();
+            self.pax.count = 0;
+            self.settlers.clear();
+            self.stats.colonies_founded += 1;
+            self.log.push(
+                self.t,
+                Level::Good,
+                format!("{name} is founded on {world_name} by {} settlers ({}). Your family remains at the capital; the ship flies on.", plan.colonists, hab.name().to_lowercase()),
+            );
+            return Ok(());
         }
         self.colony = Some(colony);
         self.unload_to_colony();
@@ -793,6 +1189,7 @@ impl Sim {
         self.crew.count = names.len();
         self.crew.names = names;
         self.pax.count = 0;
+        self.settlers.clear();
         self.spouse = None;
         self.in_colony = true;
         self.ship_dormant = false;
@@ -871,6 +1268,38 @@ impl Sim {
         msg
     }
 
+    /// Hegemony is law at the capital.
+    pub fn hegemony(&self) -> bool {
+        self.colony.as_ref().is_some_and(|c| c.laws.iter().any(|e| e.law == law::Law::Hegemony))
+    }
+
+    /// The capital, then the other colonies.
+    pub fn all_colonies(&self) -> impl Iterator<Item = &PlayerColony> {
+        self.colony.iter().chain(self.outposts.iter())
+    }
+
+    /// Colony `i` (0 = the capital).
+    pub fn colony_at(&self, i: usize) -> Option<&PlayerColony> {
+        if i == 0 { self.colony.as_ref() } else { self.outposts.get(i - 1) }
+    }
+
+    pub fn colony_count(&self) -> usize {
+        self.all_colonies().count()
+    }
+
+    /// Swap colony `i` into `colony` (or back: call twice), so colony
+    /// actions written for the capital act on it. If the swapped-in colony
+    /// was abandoned in between, the second call restores the capital.
+    pub fn swap_colony(&mut self, i: usize) {
+        if i == 0 || i > self.outposts.len() {
+            return;
+        }
+        match self.colony.as_mut() {
+            Some(c) => std::mem::swap(c, &mut self.outposts[i - 1]),
+            None => self.colony = Some(self.outposts.remove(i - 1)),
+        }
+    }
+
     /// Back to the ship (space mode). The colony lives on at ship time.
     pub fn leave_colony(&mut self) -> Result<(), String> {
         if !self.in_colony {
@@ -887,6 +1316,9 @@ impl Sim {
     /// Settle back in at the colony (the ship must be docked there).
     pub fn enter_colony(&mut self) -> Result<(), String> {
         let Some(c) = &self.colony else { return Err("You have no colony.".into()) };
+        if c.outpost {
+            return Err(format!("Your family lives at your capital; {} is run by its settlers. Unload here, then fly on.", c.name));
+        }
         if self.sys_id != c.sys_id || self.loc != c.loc || self.trip.is_some() || self.shuttle.is_some() {
             return Err(format!("Dock at {} to return to your colony.", c.world));
         }
@@ -902,8 +1334,15 @@ impl Sim {
         if self.ship_dormant {
             return Err("Without a ship there is nowhere to go.".into());
         }
+        if self.colony.as_ref().is_some_and(|c| !c.outpost) && !self.outposts.is_empty() {
+            return Err("Your other colonies answer to this one: abandon them first.".into());
+        }
         let Some(c) = self.colony.take() else { return Err("You have no colony.".into()) };
         self.stats.colonies_abandoned += 1;
+        if !c.outpost && !self.fleet.is_empty() {
+            self.log.push(self.t, Level::Warn, format!("The {} ship(s) laid up there stay behind with the colony.", self.fleet.len()));
+            self.fleet.clear();
+        }
         let sys = gal.system(c.sys_id);
         if let Some(p) = sys.site_mut(c.loc) {
             p.colony = Some(c.as_independent());
@@ -911,7 +1350,9 @@ impl Sim {
         sys.civ = crate::sim::worldgen::derive_civ(&sys.planets);
         sys.market = None;
         sys.refresh_cargo_market(self.seed);
-        self.in_colony = false;
+        if !c.outpost {
+            self.in_colony = false;
+        }
         self.log.push(self.t, Level::Warn, format!("You leave {}. It carries on as an independent colony of {:.0}.", c.name, c.population()));
         Ok(())
     }
@@ -969,10 +1410,21 @@ impl Sim {
         }
     }
 
-    /// Buy supplies from the merchants at the colony's space dock.
-    pub fn dock_buy(&mut self, g: Good, n: u32) {
+    /// Is the ship docked at the colony (the one in `colony`), so the
+    /// dock can load straight into its hold?
+    pub fn ship_at_colony(&self) -> bool {
+        let Some(c) = self.colony.as_ref() else { return false };
+        !self.ship_dormant && self.trip.is_none() && self.shuttle.is_none() && self.sys_id == c.sys_id && self.loc == c.loc
+    }
+
+    /// Buy supplies from the merchants at the colony's space dock, into
+    /// the colony or (`to_ship`, when docked there) the ship's hold.
+    pub fn dock_buy(&mut self, g: Good, n: u32, to_ship: bool) {
         let now = years(self.t);
+        let to_ship = to_ship && self.ship_at_colony();
+        let fit = if to_ship { (self.cargo_room_t() / g.mass_t() + 1e-9).floor() as u32 } else { u32::MAX };
         let Some(c) = self.colony.as_mut() else { return };
+        c.restock_dock(now);
         let Some(m) = c.market.as_mut() else {
             self.log.push(self.t, Level::Warn, "The colony has no space dock yet.");
             return;
@@ -982,21 +1434,34 @@ impl Sim {
             return;
         };
         let stock = m.offers[&g].stock;
-        let k = n.min(stock).min((self.credits / price).floor() as u32);
+        let afford = (self.credits / price).floor() as u32;
+        let k = n.min(stock).min(afford).min(fit);
         if k == 0 {
-            self.log.push(self.t, Level::Warn, format!("You cannot afford {g} ({price:.0} cr each)."));
+            let why = if fit == 0 {
+                format!("No room in the hold for {g} ({:.1} t each).", g.mass_t())
+            } else {
+                format!("You cannot afford {g} ({price:.0} cr each).")
+            };
+            self.log.push(self.t, Level::Warn, why);
             return;
         }
         if let Some(o) = m.offers.get_mut(&g) {
             o.stock -= k;
         }
         self.credits -= k as f64 * price;
+        let cost = k as f64 * price;
+        if to_ship {
+            self.hold.add(g, k);
+            let ship = self.ship().name;
+            self.log.push(self.t, Level::Good, format!("The dock loads {k} × {g} aboard the {ship} for {cost:.0} cr."));
+            return;
+        }
         if g == Good::GeneKit {
             c.gene_kit = c.gene_kit || c.hybrid;
         } else {
             c.add_supply(g, k, now);
         }
-        self.log.push(self.t, Level::Good, format!("The dock delivers {k} × {g} for {:.0} cr.", k as f64 * price));
+        self.log.push(self.t, Level::Good, format!("The dock delivers {k} × {g} for {cost:.0} cr."));
     }
 
     /// Sell tonnes of the colony's stockpile at the dock.
@@ -1024,7 +1489,7 @@ impl Sim {
         let boost = (self.artifact_tech_boost(), self.artifact_health_boost());
         let mut notes = Vec::new();
         if let Some(c) = self.colony.as_mut() {
-            let built = |c: &PlayerColony| c.pmp + c.biodomes + c.dock as u32 + c.business as u32;
+            let built = |c: &PlayerColony| c.pmp + c.biodomes + c.dock as u32 + c.business as u32 + c.shipyard as u32;
             let (b0, d0, n0) = (c.births_total, c.deaths_total, built(c));
             c.advance(now, home, boost, &mut notes);
             self.stats.colony_births += c.births_total - b0;
@@ -1034,6 +1499,48 @@ impl Sim {
         }
         for (lvl, msg) in notes {
             self.log.push(self.t, lvl, msg);
+        }
+        // The other colonies live on by themselves.
+        for c in self.outposts.iter_mut() {
+            let mut notes = Vec::new();
+            let built = |c: &PlayerColony| c.pmp + c.biodomes + c.dock as u32 + c.business as u32 + c.shipyard as u32;
+            let (b0, d0, n0) = (c.births_total, c.deaths_total, built(c));
+            c.advance(now, false, boost, &mut notes);
+            self.stats.colony_births += c.births_total - b0;
+            self.stats.colony_deaths += c.deaths_total - d0;
+            self.stats.buildings += built(c).saturating_sub(n0);
+            for (lvl, msg) in notes {
+                self.log.push(self.t, lvl, format!("{}: {msg}", c.name));
+            }
+        }
+        // Launched ships join the fleet. An ark takes on settlers from the
+        // colony that built it.
+        let mut launched: Vec<(usize, usize)> = Vec::new();
+        if let Some(c) = self.colony.as_mut() {
+            launched.extend(std::mem::take(&mut c.hangar).into_iter().map(|s| (0, s)));
+        }
+        for (k, c) in self.outposts.iter_mut().enumerate() {
+            launched.extend(std::mem::take(&mut c.hangar).into_iter().map(|s| (k + 1, s)));
+        }
+        for (from, idx) in launched {
+            let b = if idx == crate::sim::shipyard::ARK {
+                let pax = crate::sim::ShipSpec::spec(idx).pax;
+                let src = if from == 0 { self.colony.as_mut() } else { self.outposts.get_mut(from - 1) };
+                let (name, people) = match src {
+                    Some(c) => (c.name.clone(), c.ark_settlers(pax, now)),
+                    None => (String::new(), vec![]),
+                };
+                let royal = people.iter().filter(|e| e.royal).count();
+                let n = people.len();
+                let b = self.launched_ark(people);
+                let kin = if royal > 0 { format!(", {royal} of them of the royal line") } else { String::new() };
+                self.log.push(self.t, Level::Good, format!("An ark is launched at {name}: {n} of its people board as settlers{kin}. It waits with the fleet."));
+                b
+            } else {
+                self.new_berthed(idx)
+            };
+            self.fleet.push(b);
+            self.stats.ships_built += 1;
         }
         if self.colony.is_some() && self.player_age() >= self.retire_age {
             self.retire(gal);
@@ -1062,13 +1569,14 @@ impl Sim {
                 break;
             }
         }
-        let adult = |p: &Person| p.alive() && !p.alien && (22.0..55.0).contains(&p.age(now));
+        let emigrated = c.census.emigrated.clone();
+        let adult = |p: &Person, id: u32| p.alive() && !emigrated.contains_key(&id) && !p.alien && (22.0..55.0).contains(&p.age(now));
         let pick = line
             .iter()
             .copied()
-            .filter(|&i| adult(&c.census.people[i as usize]))
+            .filter(|&i| adult(&c.census.people[i as usize], i))
             .max_by(|a, b| c.census.people[*a as usize].born.total_cmp(&c.census.people[*b as usize].born).reverse())
-            .or_else(|| c.census.living.iter().copied().filter(|&i| i != old && adult(&c.census.people[i as usize])).max_by_key(|&i| (c.census.people[i as usize].born * 10.0) as i64))
+            .or_else(|| c.census.living.iter().copied().filter(|&i| i != old && adult(&c.census.people[i as usize], i)).max_by_key(|&i| (c.census.people[i as usize].born * 10.0) as i64))
             .or_else(|| c.census.materialize(35, !c.census.people[old as usize].female, now, false));
         let Some(new) = pick else {
             // Nobody left to take over: the captain carries on.
@@ -1156,6 +1664,49 @@ mod tests {
         }
     }
 
+    /// The space dock restocks over time like any port, its plants'
+    /// share made from the stockpile; purchases can go into the ship.
+    #[test]
+    fn the_dock_restocks_and_loads_the_ship() {
+        let (mut sim, mut gal) = at_world(2, Hab::Habitable);
+        sim.found_colony(&mut gal).unwrap();
+        let unload = sim.hold.mass_t();
+        let c = sim.colony.as_mut().unwrap();
+        c.dock = true;
+        c.pmp = 5;
+        c.materials = 10_000.0;
+        c.refresh_market();
+        let g = Good::MedKit;
+        let usual = c.dock_usual[&g];
+        assert!(usual >= c.plant_stock(g) && c.plant_stock(g) == 500, "plants stock 5,000 colonists' med kits");
+        assert_eq!(c.market.as_ref().unwrap().offers[&g].stock, usual, "a new dock opens full");
+
+        // Buy it out into the ship's hold (docked at the colony).
+        sim.credits = 1e9;
+        assert!(sim.ship_at_colony());
+        let before = sim.colony.as_ref().unwrap().units(g);
+        sim.dock_buy(g, usual, true);
+        assert_eq!(sim.hold.get(g), usual.min(((sim.ship().cargo_t - unload) / g.mass_t()) as u32));
+        assert_eq!(sim.colony.as_ref().unwrap().units(g), before, "nothing went to the colony");
+        let left = sim.colony.as_ref().unwrap().market.as_ref().unwrap().offers[&g].stock;
+
+        // A month later about two thirds is back, the plants' part paid
+        // for in materials.
+        let c = sim.colony.as_mut().unwrap();
+        let (now, mat) = (c.clock, c.materials);
+        c.restock_dock(now + 1.0 / 12.0);
+        let stock = c.market.as_ref().unwrap().offers[&g].stock;
+        assert!(stock > left + (usual - left) / 2, "restocked {left} -> {stock} of {usual}");
+        assert!(c.materials < mat, "the plants used materials");
+
+        // Away from the colony, deliveries go to the colony.
+        sim.loc = Loc::Star;
+        assert!(!sim.ship_at_colony());
+        let held = sim.hold.get(g);
+        sim.dock_buy(g, 1, true);
+        assert_eq!(sim.hold.get(g), held);
+    }
+
     #[test]
     fn the_ark_founds_a_growing_colony() {
         let (mut sim, mut gal) = at_world(2, Hab::Habitable);
@@ -1226,7 +1777,10 @@ mod tests {
     fn supplies_wear_out_and_the_plant_replaces_them() {
         let (mut sim, mut gal) = at_world(2, Hab::Habitable);
         sim.found_colony(&mut gal).unwrap();
-        // Med kits last a year.
+        // Med kits last five years (no plant to replace them yet).
+        sim.colony.as_mut().unwrap().auto_build = false;
+        run_years(&mut sim, &mut gal, 4.0);
+        assert!(sim.colony.as_ref().unwrap().units(Good::MedKit) > 0, "still good after four years");
         run_years(&mut sim, &mut gal, 1.5);
         assert_eq!(sim.colony.as_ref().unwrap().units(Good::MedKit), 0);
         let c = sim.colony.as_mut().unwrap();
@@ -1372,5 +1926,223 @@ mod tests {
             }
         }
         assert!(grew * 2 >= n, "only {grew}/{n} couples took root");
+    }
+}
+
+#[cfg(test)]
+mod medkit_unload_tests {
+    use super::*;
+
+    /// The path a player's kits take: bought into the hold, unloaded at the
+    /// colony years after founding. They must last five years from delivery.
+    #[test]
+    fn unloaded_med_kits_last_five_years() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 2, &mut gal);
+        let home = gal.home_id();
+        let idx = gal.system(home).planets.iter().position(|p| world::colonizable(p).is_ok()).unwrap();
+        sim.shuttle = None;
+        sim.loc = Loc::Planet(idx);
+        sim.found_colony(&mut gal).unwrap();
+        sim.colony.as_mut().unwrap().auto_build = false;
+        sim.colony.as_mut().unwrap().supplies.remove(&Good::MedKit);
+        // Years later the ship comes back with fresh kits.
+        sim.advance(3.0 * HOURS_PER_YEAR, &mut gal);
+        sim.in_colony = false;
+        sim.hold.add(Good::MedKit, 15);
+        let now = years(sim.t);
+        sim.unload_to_colony();
+        let b = &sim.colony.as_ref().unwrap().supplies[&Good::MedKit];
+        assert_eq!(b.len(), 1);
+        assert!((b[0].until - (now + 5.0)).abs() < 1e-9, "until {} now {now}", b[0].until);
+        sim.in_colony = true;
+        sim.advance(2.0 * HOURS_PER_YEAR, &mut gal);
+        assert_eq!(sim.colony.as_ref().unwrap().units(Good::MedKit), 15, "still there two years on");
+    }
+
+    /// Spare kits in store do not wear: only those the colony needs age.
+    #[test]
+    fn spare_supplies_keep_in_store() {
+        let mut b = vec![Batch { units: 15, until: 5.0 }];
+        // Fifteen colonists need two kits; thirteen sit idle.
+        for _ in 0..60 {
+            idle_keep(&mut b, 2, MONTH);
+        }
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].units, 2);
+        assert!((b[0].until - 5.0).abs() < 1e-9);
+        assert_eq!(b[1].units, 13);
+        assert!((b[1].until - 10.0).abs() < 1e-6, "idle kits kept: {}", b[1].until);
+        // Nothing needed: nothing ages.
+        let mut c = vec![Batch { units: 4, until: 3.0 }];
+        idle_keep(&mut c, 0, 1.0);
+        assert!((c[0].until - 4.0).abs() < 1e-9);
+        // All needed: all age.
+        idle_keep(&mut c, 9, 1.0);
+        assert_eq!(c.len(), 1);
+        assert!((c[0].until - 4.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod materials_display_tests {
+    use super::*;
+
+    /// The net the colony screens show is what really happens to the
+    /// stockpile, construction included.
+    #[test]
+    fn the_shown_materials_trend_matches_the_stockpile() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 2, &mut gal);
+        let home = gal.home_id();
+        let idx = gal.system(home).planets.iter().position(|p| world::colonizable(p).is_ok()).unwrap();
+        sim.shuttle = None;
+        sim.loc = Loc::Planet(idx);
+        sim.found_colony(&mut gal).unwrap();
+        let c = sim.colony.as_mut().unwrap();
+        c.auto_build = false;
+        c.materials = 50_000.0;
+        c.queue.push(Construction { kind: Project::Business, done: 0.0 });
+        // Settle one month in, then compare the next month's change.
+        sim.advance(HOURS_PER_YEAR / 12.0 + 1.0, &mut gal);
+        let c = sim.colony.as_ref().unwrap();
+        assert!(c.ind.materials_build_y > 0.0, "construction is drawing");
+        let (m0, clock0) = (c.materials, c.clock);
+        sim.advance(HOURS_PER_YEAR / 12.0, &mut gal);
+        let c = sim.colony.as_ref().unwrap();
+        let shown = c.ind.materials_made_y - c.ind.materials_upkeep_y - c.ind.materials_build_y;
+        let real = (c.materials - m0) / (c.clock - clock0);
+        assert!((real - shown).abs() <= shown.abs() * 0.02 + 1.0, "shown {shown:.1} t/yr, real {real:.1} t/yr");
+    }
+}
+
+#[cfg(test)]
+mod hegemony_colony_tests {
+    use super::*;
+    use crate::sim::civ::{Civ, CivKind, CivTier};
+    use crate::sim::shipyard::{Purchase, ARK};
+
+    /// A capital founded by the ark, and a second rocky world to settle.
+    fn setup() -> (Sim, Galaxy, usize) {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 2, &mut gal);
+        let home = gal.home_id();
+        let sys = gal.system(home);
+        let idx = sys.planets.iter().position(|p| world::colonizable(p).is_ok()).unwrap();
+        let other = (0..sys.planets.len()).find(|&j| j != idx).unwrap();
+        let au = sys.planets[other].au;
+        sys.planets[other] = sys.planets[idx].clone();
+        sys.planets[other].au = au;
+        sys.civ = Some(Civ { tier: CivTier::T3, name: "Test".into(), kind: CivKind::Colony, seat: Loc::Star, small: false });
+        sim.shuttle = None;
+        sim.loc = Loc::Planet(idx);
+        sim.found_colony(&mut gal).unwrap();
+        (sim, gal, other)
+    }
+
+    fn royal(c: &mut PlayerColony, age: f64, father: Option<u32>, now: f64) -> u32 {
+        c.census.add(Person {
+            female: false,
+            born: (now - age) as f32,
+            died: None,
+            mother: None,
+            father,
+            spouse: None,
+            alien: false,
+            origin: Origin::Born,
+            due: None,
+            unseen: vec![],
+            parents_unseen: false,
+            line: true,
+        })
+    }
+
+    /// An ark built at a colony carries that colony's own people: a share
+    /// of the royal line present, never the heirs. They found the next
+    /// colony as themselves, kept by age band but for the royal line.
+    #[test]
+    fn a_built_ark_carries_the_colonys_people_and_some_royals() {
+        let (mut sim, mut gal, other) = setup();
+        let now = years(sim.t);
+        let c = sim.colony.as_mut().unwrap();
+        c.laws.push(law::Enacted { law: law::Law::Hegemony, since: 0.0 });
+        let player = c.player;
+        let heir = royal(c, 30.0, Some(player), now);
+        let cousins: Vec<u32> = (0..8).map(|k| royal(c, 25.0 + k as f64, None, now)).collect();
+        c.hangar.push(ARK);
+        let pop0 = c.population();
+        sim.colony_tick(&mut gal);
+        let c = sim.colony.as_ref().unwrap();
+        let ark = sim.fleet.last().unwrap();
+        let n = ark.settlers.len();
+        assert!(n >= 300 && ark.pax.count == n, "{n} settlers");
+        assert!((c.population() - (pop0 - n as f64)).abs() < 1.0, "they left the capital");
+        assert!(c.census.here(player) && c.census.here(heir), "the captain and heirs stay");
+        let royals: Vec<_> = ark.settlers.iter().filter(|e| e.royal).collect();
+        assert_eq!(royals.len(), 2, "a quarter of the 8 royal cousins");
+        assert_eq!(cousins.iter().filter(|&&i| c.census.emigrated.contains_key(&i)).count(), 2);
+        let royal_name = royals[0].family.clone();
+        // Board it, fly to the other world, and found the colony.
+        let slot = sim.fleet.len() - 1;
+        sim.switch_ship(slot).unwrap();
+        sim.leave_colony().unwrap();
+        sim.loc = Loc::Planet(other);
+        sim.found_colony(&mut gal).unwrap();
+        let out = &sim.outposts[0];
+        assert!(out.census.demographic, "kept by age band");
+        assert_eq!(out.census.living.len(), 2, "only the royal settlers are records");
+        assert!(out.census.people[out.player as usize].line, "a royal leads it");
+        assert_eq!(out.census.family_name(out.player), royal_name);
+        assert!(out.population() >= n as f64, "everyone arrived");
+        assert!(sim.settlers.is_empty() && sim.pax.count == 0);
+    }
+
+    #[test]
+    fn hegemony_founds_more_colonies_with_settlers_not_family() {
+        let (mut sim, mut gal, other) = setup();
+        let capital_pop = sim.colony.as_ref().unwrap().population();
+        sim.leave_colony().unwrap();
+        sim.credits = 1e6;
+        // Without Hegemony: one colony, and no ark for sale.
+        assert!(!sim.ships_for_sale(&gal).contains(&ARK));
+        sim.loc = Loc::Planet(other);
+        assert!(sim.founding_plan(&gal).is_err());
+        sim.colony.as_mut().unwrap().laws.push(law::Enacted { law: law::Law::Hegemony, since: 0.0 });
+        // The captain alone has no settlers to found it with.
+        let e = sim.founding_plan(&gal).unwrap_err();
+        assert!(e.contains("settlers"), "{e}");
+        // Buy an ark: it comes with 500 settlers.
+        assert!(sim.ships_for_sale(&gal).contains(&ARK));
+        sim.buy_ship(&gal, ARK, Purchase::TradeIn).unwrap();
+        assert_eq!(sim.pax.count, 500);
+        let plan = sim.founding_plan(&gal).unwrap();
+        assert_eq!(plan.colonists, 500 + 9, "crew and passengers, not the captain");
+        let captain = sim.player_name().to_string();
+        sim.found_colony(&mut gal).unwrap();
+        assert_eq!(sim.outposts.len(), 1);
+        assert!(!sim.in_colony, "the captain flies on");
+        assert_eq!(sim.crew.names, vec![captain], "only the captain stays aboard");
+        assert_eq!(sim.pax.count, 0);
+        let out = &sim.outposts[0];
+        assert!(out.outpost && out.population() >= 500.0);
+        assert_eq!(sim.colony.as_ref().unwrap().population(), capital_pop, "the family stays at the capital");
+        // Both colonies live on.
+        let (c0, o0) = (sim.colony.as_ref().unwrap().clock, sim.outposts[0].clock);
+        sim.advance(HOURS_PER_YEAR * 0.5, &mut gal);
+        assert!(sim.colony.as_ref().unwrap().clock > c0 && sim.outposts[0].clock > o0);
+        // Actions on the outpost go through the swap; it cannot be "entered".
+        sim.swap_colony(1);
+        assert!(sim.colony.as_ref().unwrap().outpost);
+        assert!(sim.enter_colony().is_err());
+        sim.swap_colony(1);
+        assert!(!sim.colony.as_ref().unwrap().outpost, "capital restored");
+        // The capital cannot be abandoned while it has colonies.
+        assert!(sim.abandon_colony(&mut gal).is_err());
+        // Abandoning the outpost (swapped in) restores the capital.
+        sim.swap_colony(1);
+        sim.abandon_colony(&mut gal).unwrap();
+        sim.swap_colony(1);
+        assert!(sim.outposts.is_empty());
+        assert!(sim.colony.as_ref().is_some_and(|c| !c.outpost));
     }
 }

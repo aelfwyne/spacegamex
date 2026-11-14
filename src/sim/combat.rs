@@ -76,11 +76,7 @@ impl Sim {
     /// Your ship's attack and defense (hull class + upgrades + pilot).
     pub fn combat_stats(&self) -> (f64, f64) {
         let spec = &self.ship();
-        let class = match spec.crew {
-            1 => (2.0, 2.0),
-            n if n <= 10 && spec.pax == 0 => (3.0, 3.0),
-            _ => (2.5, 4.0),
-        };
+        let class = (spec.attack, spec.defense);
         let pilot = self.pilot.as_ref().map(|p| p.skill as f64 * 0.5).unwrap_or(0.0);
         (
             class.0 + self.attack_lvl as f64 + self.artifact_attack() + pilot,
@@ -110,7 +106,7 @@ impl Sim {
     }
 
     pub fn flee_chance(&self) -> f64 {
-        let agile = if self.ship().crew == 1 { 0.1 } else { 0.0 };
+        let agile = if self.ship().agile { 0.1 } else { 0.0 };
         let pilot = self.pilot.as_ref().map(|p| p.skill as f64 * 0.12).unwrap_or(0.0);
         (0.3 + agile + pilot).min(0.85)
     }

@@ -62,6 +62,8 @@ pub enum ColonyTab {
     Family,
     Market,
     Laws,
+    /// The shipyard, blueprints and laid-up ships.
+    Fleet,
 }
 
 /// Time-compression steps, in the order `F` cycles through them (0 = pause).
@@ -140,6 +142,9 @@ pub enum Action {
     /// already is (the map `Enter` key).
     ToggleDestination(u64),
     ClearDestination,
+    /// Tag a system as the navigation target (the chart points the way to
+    /// it), or untag it if it already is.
+    ToggleWaypoint(u64),
     Jump,
     /// Make `id` the destination and jump now (the map `T` key).
     JumpTo(u64),
@@ -173,16 +178,30 @@ pub enum Action {
     CancelBuild(usize),
     ToggleAutoBuild,
     DockBuy(Good),
+    /// Where dock purchases go: the ship's hold (true) or the colony.
+    DockToShip(bool),
     DockSellMaterials(f64),
     SetColonyTab(ColonyTab),
     /// Show a colonist in the family view (materialises their family).
     ViewPerson(u32),
+    /// Show colony `i` on the colony screen (0 = the capital).
+    SelectColony(usize),
     RandomParent,
     OldestColonist,
     /// Victory: end the game in triumph.
     EndInVictory,
     /// Victory: give the colony up and keep flying.
     VictoryAbandon,
+    /// Victory under Hegemony: the dynasty rules on.
+    ContinueLineage,
+    // ---- ships ----
+    /// Buy a hull at an interstellar shipyard: (index, keep the old ship
+    /// in the fleet instead of trading it in).
+    BuyShip(usize, bool),
+    BuyBlueprint(usize),
+    /// Transfer the captain's flag to a laid-up ship.
+    SwitchShip(usize),
+    ScrapShip(usize),
     // ---- quests ----
     AcceptQuest(u64),
     DropQuest(u64),
@@ -223,6 +242,9 @@ pub struct App {
     pub sel_moon: Option<usize>,
     pub map_list: Vec<Neighbor>,
     pub map_sel: usize,
+    /// Every system the ship has been to (but this one), at any range,
+    /// nearest first.
+    pub visited_list: Vec<Neighbor>,
     pub trade_row: usize,
     pub trade_qty: f64,
     pub trade_tab: TradeTab,
@@ -231,6 +253,10 @@ pub struct App {
     /// The captain's sex for the next new game (title screen).
     pub title_sex: Sex,
     pub colony_tab: ColonyTab,
+    /// The colony the colony screen shows and acts on (0 = the capital).
+    pub sel_colony: usize,
+    /// Space-dock purchases go into the ship's hold instead of the colony.
+    pub dock_to_ship: bool,
     /// The colonist shown in the family view.
     pub person: Option<u32>,
     /// Real-clock time of the last colony-mode autosave.
@@ -273,12 +299,15 @@ impl App {
             sel_moon: None,
             map_list: vec![],
             map_sel: 0,
+            visited_list: vec![],
             trade_row: 0,
             trade_qty: 100.0,
             trade_tab: TradeTab::Resources,
             cargo_qty: 1,
             title_sex: Sex::Male,
             colony_tab: ColonyTab::Overview,
+            sel_colony: 0,
+            dock_to_ship: false,
             person: None,
             last_colony_save: 0.0,
             confirm_found: false,
@@ -437,7 +466,7 @@ impl App {
             ShuttleBlock::Shuttling => {
                 let leg = sim.shuttle.as_ref().unwrap();
                 format!(
-                    "Already shuttling to {} — {} left. It can't change course mid-leg.",
+                    "Already on course for {} — {} left. Pick another place to change course, or Turn back.",
                     loc_label(leg.to, sys),
                     fmt_hours(leg.remaining_h)
                 )
@@ -451,7 +480,8 @@ impl App {
     fn shuttle(&mut self, to: Loc) {
         let blocked = {
             let Some(sim) = self.sim.as_mut() else { return };
-            sim.begin_shuttle(&mut self.gal, to).err()
+            // Mid-leg, a new order changes course from where the ship is.
+            sim.redirect_shuttle(&mut self.gal, to).err()
         };
         if let Some(b) = blocked {
             let m = self.shuttle_block_msg(b);
@@ -485,6 +515,11 @@ impl App {
         let pos = self.gal.system_ref(sim.sys_id).pos;
         let sel_id = self.map_list.get(self.map_sel).map(|n| n.id);
         self.map_list = self.gal.neighbors(pos, 30.0, sim.sys_id);
+        let mut seen: Vec<u64> = sim.visited.iter().copied().filter(|&id| id != sim.sys_id).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        self.visited_list = seen.into_iter().map(|id| self.gal.neighbor(id, pos)).collect();
+        self.visited_list.sort_by(|a, b| a.dist_ly.total_cmp(&b.dist_ly));
         // Keep the same system selected across refreshes when possible;
         // otherwise start on the destination, or the nearest.
         let want = sel_id.or(sim.destination);
@@ -552,7 +587,39 @@ impl App {
 
     pub fn apply(&mut self, a: Action) {
         let before = if matches!(a, Action::StartGame(_) | Action::Continue | Action::NewGame | Action::AckGameOver) { None } else { self.credits_now() };
+        // Colony actions act on the colony on screen: swap it in as the
+        // sim's `colony` for the length of the action, then back.
+        let scoped = matches!(
+            a,
+            Action::UnloadCargo
+                | Action::Build(_)
+                | Action::CancelBuild(_)
+                | Action::ToggleAutoBuild
+                | Action::DockBuy(_)
+                | Action::DockSellMaterials(_)
+                | Action::EnactLaw(_)
+                | Action::RepealLaw(_)
+                | Action::AbandonColony
+                | Action::EnterColony
+                | Action::BuyBlueprint(_)
+                | Action::SetColonyTab(_)
+                | Action::ViewPerson(_)
+                | Action::RandomParent
+                | Action::OldestColonist
+        );
+        let sel = self.sim.as_ref().map_or(0, |s| self.sel_colony.min(s.outposts.len()));
+        let swap = scoped && sel > 0;
+        if swap {
+            self.sim.as_mut().unwrap().swap_colony(sel);
+        }
         self.apply_inner(a);
+        if swap && let Some(sim) = self.sim.as_mut() {
+            sim.swap_colony(sel);
+            if sel > sim.outposts.len() {
+                self.sel_colony = 0;
+                self.person = None;
+            }
+        }
         self.track_credits(before);
     }
 
@@ -581,7 +648,7 @@ impl App {
             return;
         }
         match a {
-            Action::SelectShip(i) => self.title_sel = i.min(crate::sim::SHIPS.len() - 1),
+            Action::SelectShip(i) => self.title_sel = i.min(crate::sim::STARTERS - 1),
             Action::SetSeed(s) => self.gal = Galaxy::with_opts(s, self.gal.opts),
             Action::SetOpts(o) => self.gal = Galaxy::with_opts(self.gal.seed, o),
             Action::SetSex(x) => self.title_sex = x,
@@ -728,6 +795,17 @@ impl App {
                 if sim.trip.is_none() && sim.destination.is_some() {
                     sim.clear_destination();
                     self.flash("Destination cleared.");
+                }
+            }
+            Action::ToggleWaypoint(id) => {
+                let sim = self.sim.as_mut().unwrap();
+                if sim.waypoint == Some(id) {
+                    sim.waypoint = None;
+                    self.flash("Target cleared.");
+                } else {
+                    sim.waypoint = Some(id);
+                    let name = self.gal.system(id).star.name.clone();
+                    self.flash(format!("Target: {name}. The star map points the way."));
                 }
             }
             Action::Jump => self.jump(),
@@ -883,8 +961,10 @@ impl App {
             }),
             Action::DockBuy(g) => {
                 let n = self.cargo_qty;
-                self.with_sim(|s| s.dock_buy(g, n));
+                let to_ship = self.dock_to_ship;
+                self.with_sim(|s| s.dock_buy(g, n, to_ship));
             }
+            Action::DockToShip(b) => self.dock_to_ship = b,
             Action::DockSellMaterials(t) => self.with_sim(|s| s.dock_sell_materials(t)),
             Action::SetColonyTab(t) => {
                 self.colony_tab = t;
@@ -892,6 +972,16 @@ impl App {
                     let me = self.sim().colony.as_ref().map(|c| c.player);
                     if let Some(id) = me {
                         self.apply_inner(Action::ViewPerson(id));
+                    }
+                }
+            }
+            Action::SelectColony(i) => {
+                let n = self.sim().colony_count();
+                if i < n {
+                    self.sel_colony = i;
+                    self.person = None;
+                    if self.colony_tab == ColonyTab::Family {
+                        self.colony_tab = ColonyTab::Overview;
                     }
                 }
             }
@@ -934,6 +1024,41 @@ impl App {
                     self.flash(e);
                 }
                 self.screen = Screen::Cockpit;
+            }
+            Action::ContinueLineage => {
+                let sim = self.sim.as_mut().unwrap();
+                let ok = sim.colony.as_ref().is_some_and(|c| c.laws.iter().any(|e| e.law == Law::Hegemony));
+                if ok {
+                    sim.victory_seen = true;
+                    let name = sim.colony.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+                    let house = sim.player_surname();
+                    sim.log.push(sim.t, Level::Good, format!("A million souls, and the House of {house} rules {name} still. The Royal Lineage continues."));
+                    self.screen = Screen::Cockpit;
+                } else {
+                    self.flash("Only a colony under Hegemony can rule on past a million.");
+                }
+            }
+            Action::BuyShip(idx, fleet) => {
+                let how = if fleet { crate::sim::shipyard::Purchase::Fleet } else { crate::sim::shipyard::Purchase::TradeIn };
+                let sim = self.sim.as_mut().unwrap();
+                if let Err(e) = sim.buy_ship(&self.gal, idx, how) {
+                    self.flash(e);
+                }
+            }
+            Action::BuyBlueprint(idx) => {
+                if let Err(e) = self.sim.as_mut().unwrap().buy_blueprint(idx) {
+                    self.flash(e);
+                }
+            }
+            Action::SwitchShip(slot) => {
+                if let Err(e) = self.sim.as_mut().unwrap().switch_ship(slot) {
+                    self.flash(e);
+                }
+            }
+            Action::ScrapShip(slot) => {
+                if let Err(e) = self.sim.as_mut().unwrap().scrap_ship(slot) {
+                    self.flash(e);
+                }
             }
             Action::RepairHull => {
                 let sim = self.sim.as_mut().unwrap();
@@ -1377,6 +1502,28 @@ mod tests {
         app.handle_key(Key::Char('0'));
         app.handle_key(Key::Down);
         assert_eq!(app.map_sel, 1.min(app.map_list.len() - 1));
+    }
+
+    /// Systems visited stay listed at any range, and one can be tagged as
+    /// the target (saved with the game).
+    #[test]
+    fn visited_list_and_target() {
+        let mut app = App::with_game(42, 0);
+        let home = app.sim().sys_id;
+        app.refresh_map();
+        let far = app.map_list.last().expect("a charted system").id;
+        app.sim.as_mut().unwrap().visited.push(far);
+        app.refresh_map();
+        assert_eq!(app.visited_list.len(), 1);
+        assert_eq!(app.visited_list[0].id, far);
+        app.apply(Action::ToggleWaypoint(far));
+        assert_eq!(app.sim().waypoint, Some(far));
+        app.apply(Action::ToggleWaypoint(far));
+        assert_eq!(app.sim().waypoint, None);
+        app.apply(Action::ToggleWaypoint(home));
+        let json = serde_json::to_string(app.sim()).unwrap();
+        let back: Sim = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.waypoint, Some(home));
     }
 
     /// Every key on every screen, from a fresh game: nothing may panic.

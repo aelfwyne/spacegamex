@@ -54,6 +54,36 @@ pub struct ShipSpec {
     pub tanks: [(Res, f64); 11],
     /// Starting stock as a fraction of capacity.
     pub start_frac: [(Res, f64); 11],
+
+    /// List price at an interstellar shipyard (credits). Also sets the
+    /// trade-in value, blueprint price and colony build cost.
+    pub price: f64,
+    /// Interstellar shipyards sell it (the ark is never on the market).
+    pub for_sale: bool,
+    /// Hull class in battle (before upgrades and pilot).
+    pub attack: f64,
+    pub defense: f64,
+    /// Small and nimble: better odds of running from pirates.
+    pub agile: bool,
+    /// "Fighter", "Cargo" or "General" (for the shipyard lists).
+    pub role: Role,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    General,
+    Fighter,
+    Cargo,
+}
+
+impl Role {
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::General => "General",
+            Role::Fighter => "Fighter",
+            Role::Cargo => "Cargo",
+        }
+    }
 }
 
 const SOLO: ShipSpec = ShipSpec {
@@ -110,6 +140,12 @@ const SOLO: ShipSpec = ShipSpec {
         (Res::Mat, 0.5),
         (Res::Med, 0.8),
     ],
+    price: 30_000.0,
+    for_sale: true,
+    attack: 2.0,
+    defense: 2.0,
+    agile: true,
+    role: Role::General,
 };
 
 const COMPANY: ShipSpec = ShipSpec {
@@ -166,6 +202,12 @@ const COMPANY: ShipSpec = ShipSpec {
         (Res::Mat, 0.5),
         (Res::Med, 0.8),
     ],
+    price: 100_000.0,
+    for_sale: true,
+    attack: 3.0,
+    defense: 3.0,
+    agile: false,
+    role: Role::General,
 };
 
 const COLONY: ShipSpec = ShipSpec {
@@ -175,8 +217,11 @@ const COLONY: ShipSpec = ShipSpec {
     crew: 10,
     pax: 500,
     hull: 600.0,
-    reactor_mw: 700.0,
-    reactor_burn: 80.0,
+    // Enough to run everything in-system at once (life support, fab,
+    // drones, scoop, shields and precharge: 735 MW). The burn keeps the
+    // old fuel cost per MW.
+    reactor_mw: 800.0,
+    reactor_burn: 91.0,
     scoop_mw: 25.0,
     scoop_rate: 400.0,
     drones: 40,
@@ -226,9 +271,224 @@ const COLONY: ShipSpec = ShipSpec {
         (Res::Mat, 0.6),
         (Res::Med, 0.8),
     ],
+    price: 400_000.0,
+    for_sale: false,
+    attack: 2.5,
+    defense: 4.0,
+    agile: false,
+    role: Role::General,
 };
 
-pub const SHIPS: [ShipSpec; 3] = [SOLO, COMPANY, COLONY];
+// ---- hulls bought at interstellar shipyards (or built from blueprints) ----
+// Priced against the Company ship at 100,000 cr.
+
+#[allow(clippy::too_many_arguments)]
+const fn tanks(h2: f64, ice: f64, metal: f64, sil: f64, carbon: f64, n2: f64, water: f64, o2: f64, food: f64, mat: f64, med: f64) -> [(Res, f64); 11] {
+    [
+        (Res::H2, h2),
+        (Res::Ice, ice),
+        (Res::Metal, metal),
+        (Res::Silicate, sil),
+        (Res::Carbon, carbon),
+        (Res::Nitrogen, n2),
+        (Res::Water, water),
+        (Res::Oxygen, o2),
+        (Res::Food, food),
+        (Res::Mat, mat),
+        (Res::Med, med),
+    ]
+}
+
+const LANCER: ShipSpec = ShipSpec {
+    key: "LANCER",
+    name: "Interceptor 'Kestrel'",
+    blurb: "Two-seat interceptor. Fast, hard-hitting and quick to break off; little hold and a thirsty drive.",
+    crew: 2,
+    hull: 150.0,
+    reactor_mw: 150.0,
+    reactor_burn: 18.0,
+    scoop_rate: 40.0,
+    drones: 2,
+    fab_rate: 100.0,
+    fab_mw: 25.0,
+    ftl_mw: 90.0,
+    ftl_burn: 60.0,
+    ftl_speed: 10.0,
+    precharge_mw: 40.0,
+    precharge_mwh_ly: 30.0,
+    ls_mw: 18.0,
+    shields_mw: 25.0,
+    wear_per_ly: 0.07,
+    move_time_per_au: 0.12,
+    move_fuel_per_au: 0.6,
+    cargo_t: 10.0,
+    tanks: tanks(6_000.0, 2_500.0, 3_500.0, 2_500.0, 1_800.0, 1_200.0, 2_500.0, 800.0, 1_200.0, 1_200.0, 80.0),
+    price: 60_000.0,
+    attack: 5.0,
+    defense: 3.5,
+    agile: true,
+    role: Role::Fighter,
+    ..SOLO
+};
+
+const WARDEN: ShipSpec = ShipSpec {
+    key: "WARDEN",
+    name: "Gunship 'Sentinel'",
+    blurb: "Patrol gunship, crew of six. Heavy guns and armour on a working hull with a modest hold.",
+    crew: 6,
+    hull: 400.0,
+    reactor_mw: 320.0,
+    reactor_burn: 38.0,
+    scoop_rate: 90.0,
+    fab_rate: 260.0,
+    fab_mw: 55.0,
+    ftl_mw: 180.0,
+    ftl_burn: 160.0,
+    ftl_speed: 8.5,
+    precharge_mw: 70.0,
+    precharge_mwh_ly: 65.0,
+    ls_mw: 30.0,
+    shields_mw: 50.0,
+    wear_per_ly: 0.05,
+    move_time_per_au: 0.16,
+    cargo_t: 30.0,
+    tanks: tanks(14_000.0, 5_000.0, 9_000.0, 5_000.0, 4_000.0, 3_000.0, 5_000.0, 1_500.0, 2_500.0, 3_000.0, 200.0),
+    price: 160_000.0,
+    attack: 7.0,
+    defense: 6.0,
+    role: Role::Fighter,
+    ..COMPANY
+};
+
+const BASTION: ShipSpec = ShipSpec {
+    key: "BASTION",
+    name: "Heavy Frigate 'Aegis'",
+    blurb: "A warship in all but flag, crew of fourteen. Pirates think twice; the fuel bill does not.",
+    crew: 14,
+    hull: 850.0,
+    reactor_mw: 650.0,
+    reactor_burn: 75.0,
+    scoop_mw: 20.0,
+    scoop_rate: 200.0,
+    drones: 8,
+    drone_yield: 20.0,
+    fab_rate: 600.0,
+    fab_mw: 110.0,
+    ftl_mw: 360.0,
+    ftl_burn: 380.0,
+    ftl_speed: 7.5,
+    precharge_mw: 120.0,
+    precharge_mwh_ly: 120.0,
+    ls_mw: 60.0,
+    shields_mw: 100.0,
+    wear_per_ly: 0.04,
+    move_time_per_au: 0.2,
+    move_fuel_per_au: 1.8,
+    cargo_t: 60.0,
+    tanks: tanks(30_000.0, 9_000.0, 16_000.0, 9_000.0, 7_000.0, 5_000.0, 9_000.0, 3_000.0, 5_000.0, 6_000.0, 400.0),
+    price: 380_000.0,
+    attack: 10.0,
+    defense: 9.0,
+    role: Role::Fighter,
+    ..COMPANY
+};
+
+const COURIER: ShipSpec = ShipSpec {
+    key: "COURIER",
+    name: "Fast Packet 'Swallow'",
+    blurb: "Two-crew courier with an oversized drive. The fastest thing in the lanes, with room for a little freight.",
+    crew: 2,
+    hull: 120.0,
+    reactor_mw: 140.0,
+    reactor_burn: 16.0,
+    scoop_rate: 45.0,
+    fab_rate: 90.0,
+    ftl_mw: 85.0,
+    ftl_burn: 50.0,
+    ftl_speed: 12.0,
+    precharge_mw: 40.0,
+    precharge_mwh_ly: 22.0,
+    ls_mw: 16.0,
+    wear_per_ly: 0.06,
+    move_time_per_au: 0.1,
+    cargo_t: 40.0,
+    tanks: tanks(7_000.0, 2_000.0, 3_000.0, 2_000.0, 1_500.0, 1_000.0, 2_200.0, 700.0, 1_100.0, 900.0, 60.0),
+    price: 55_000.0,
+    attack: 2.0,
+    defense: 2.0,
+    agile: true,
+    role: Role::Cargo,
+    ..SOLO
+};
+
+const HAULER: ShipSpec = ShipSpec {
+    key: "HAULER",
+    name: "Bulk Freighter 'Ox'",
+    blurb: "Crew of eight and a 300-tonne hold. Slow, sturdy and profitable on any trade run.",
+    crew: 8,
+    hull: 380.0,
+    reactor_mw: 300.0,
+    reactor_burn: 36.0,
+    scoop_rate: 100.0,
+    drones: 4,
+    fab_rate: 320.0,
+    fab_mw: 65.0,
+    ftl_mw: 190.0,
+    ftl_burn: 190.0,
+    ftl_speed: 7.0,
+    precharge_mw: 70.0,
+    precharge_mwh_ly: 75.0,
+    ls_mw: 38.0,
+    wear_per_ly: 0.055,
+    move_time_per_au: 0.2,
+    move_fuel_per_au: 1.3,
+    cargo_t: 300.0,
+    tanks: tanks(16_000.0, 6_000.0, 9_000.0, 6_000.0, 5_000.0, 3_500.0, 6_000.0, 1_800.0, 3_000.0, 2_500.0, 180.0),
+    price: 180_000.0,
+    attack: 2.5,
+    defense: 4.0,
+    role: Role::Cargo,
+    ..COMPANY
+};
+
+const LEVIATHAN: ShipSpec = ShipSpec {
+    key: "LEVIATHAN",
+    name: "Super-Freighter 'Atlas'",
+    blurb: "Sixteen crew and a 1,200-tonne hold: a whole colony's supplies in one run. Lumbering and hungry.",
+    crew: 16,
+    hull: 900.0,
+    reactor_mw: 650.0,
+    reactor_burn: 80.0,
+    scoop_mw: 20.0,
+    scoop_rate: 250.0,
+    drones: 12,
+    drone_yield: 20.0,
+    fab_rate: 700.0,
+    fab_mw: 130.0,
+    ftl_mw: 380.0,
+    ftl_burn: 420.0,
+    ftl_speed: 6.0,
+    precharge_mw: 120.0,
+    precharge_mwh_ly: 130.0,
+    ls_mw: 70.0,
+    shields_mw: 50.0,
+    wear_per_ly: 0.045,
+    move_time_per_au: 0.24,
+    move_fuel_per_au: 2.2,
+    cargo_t: 1_200.0,
+    tanks: tanks(34_000.0, 12_000.0, 18_000.0, 11_000.0, 9_000.0, 7_000.0, 12_000.0, 3_500.0, 7_000.0, 5_000.0, 400.0),
+    price: 450_000.0,
+    attack: 2.5,
+    defense: 5.0,
+    role: Role::Cargo,
+    ..COMPANY
+};
+
+/// The first three are the starting ships (and what a colony shipyard
+/// builds without blueprints); the rest are bought or built later.
+pub const SHIPS: [ShipSpec; 9] = [SOLO, COMPANY, COLONY, LANCER, WARDEN, BASTION, COURIER, HAULER, LEVIATHAN];
+/// How many of `SHIPS` are starting ships.
+pub const STARTERS: usize = 3;
 
 /// The reactor never idles below this share of its rated burn.
 pub const REACTOR_IDLE: f64 = 0.1;
@@ -236,6 +496,28 @@ pub const REACTOR_IDLE: f64 = 0.1;
 impl ShipSpec {
     pub fn spec(idx: usize) -> &'static ShipSpec {
         &SHIPS[idx % SHIPS.len()]
+    }
+
+    /// Credits a shipyard pays for this hull in perfect condition.
+    pub fn trade_in(&self) -> f64 {
+        self.price * 0.4
+    }
+
+    /// What a colony shipyard needs to build one: (tonnes of materials,
+    /// labour-years).
+    pub fn build_cost(&self) -> (f64, f64) {
+        (self.price / 50.0, self.price / 100.0)
+    }
+
+    /// Price of the plans a colony shipyard needs for a non-starter hull.
+    pub fn blueprint_price(&self) -> f64 {
+        self.price * 0.5
+    }
+
+    /// People aboard it can carry: its crew and passengers, plus quarters
+    /// for a partner and a pilot.
+    pub fn berths(&self) -> usize {
+        self.crew + self.pax + 2
     }
 
     /// H2 kg/h the reactor burns delivering `mw` (fuel follows the power
@@ -260,3 +542,4 @@ impl ShipSpec {
         }
     }
 }
+

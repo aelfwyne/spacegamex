@@ -90,7 +90,7 @@ mod tests {
         if let Some(l) = home_site(&mut gal, |p| matches!(p.class, PlanetClass::Terrestrial | PlanetClass::SuperEarth)) {
             sites.push(("Rocky world".into(), home, l));
         }
-        let mut runs: Vec<(usize, GalaxyOpts)> = (0..SHIPS.len()).map(|i| (i, opts)).collect();
+        let mut runs: Vec<(usize, GalaxyOpts)> = (0..crate::sim::STARTERS).map(|i| (i, opts)).collect();
         for r in [crate::sim::Abundance::Scarce, crate::sim::Abundance::Abundant] {
             runs.push((0, GalaxyOpts { resources: r, ..opts }));
         }

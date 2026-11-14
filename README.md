@@ -239,7 +239,10 @@ goods. About 2 systems in 100 hold any civilisation at all; under 1 in
   next port. Attack and Defense levels at T3 shipyards; pilots at any port.
 - **Quests:** ports post jobs (recover an artifact, bring a relic, deliver
   cargo). Artifacts can be delivered for credits and an upgrade or kept for
-  a permanent power. Relics turn up while salvaging ruins.
+  a permanent power. Delivery upgrades go to Attack and Defense first, then
+  to drone refits you can't buy (ship drone yield and colony Resource Drones
+  capacity, +10% a time up to +50% each), then a 25% cash bonus with a rare
+  chance of a permanent +1% colony gain instead. Relics turn up while salvaging ruins.
 
 ### What worlds do to you
 

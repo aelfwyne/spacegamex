@@ -77,7 +77,7 @@ impl Sim {
     /// the credits received (negative when paid).
     pub fn trade_good(&mut self, gal: &mut Galaxy, g: Good, buy: bool, n: u32) -> f64 {
         let sys = gal.system(self.sys_id);
-        sys.refresh_cargo_market(self.seed);
+        sys.restock_cargo_market(self.seed, self.t);
         let Some(market) = sys.market.as_mut() else {
             self.log.push(self.t, Level::Warn, "There is no market here.");
             return 0.0;
@@ -285,5 +285,33 @@ mod tests {
             assert_eq!(sim.crew.count, 2);
             assert!(sim.crew_bonus() > 1.0);
         }
+    }
+
+    #[test]
+    fn port_stock_recovers_after_buying_it_out() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 1, &mut gal);
+        let id = sim.sys_id;
+        gal.system(id).civ = Some(crate::sim::civ::Civ { tier: CivTier::T2, name: "Port".into(), kind: crate::sim::civ::CivKind::Colony, seat: Loc::Planet(0), small: false });
+        gal.system(id).market = None;
+        gal.system(id).refresh_cargo_market(sim.seed);
+        let usual = gal.system(id).market.as_ref().unwrap().offers[&Good::MedKit].stock;
+        sim.credits = 1e9;
+        let mut bought = 0;
+        while bought < usual {
+            let b = sim.hold.get(Good::MedKit);
+            sim.trade_good(&mut gal, Good::MedKit, true, usual);
+            let got = sim.hold.get(Good::MedKit) - b;
+            if got == 0 { break; }
+            bought += got;
+            sim.hold.take(Good::MedKit, got);
+        }
+        let stock = |gal: &mut Galaxy| gal.system(id).market.as_ref().unwrap().offers[&Good::MedKit].stock;
+        assert_eq!(stock(&mut gal), 0, "bought out");
+        sim.advance(24.0 * 30.0, &mut gal);
+        let after_month = stock(&mut gal);
+        assert!(after_month as f64 > usual as f64 * 0.5 && after_month <= usual, "{after_month} of {usual} after a month");
+        sim.advance(24.0 * 150.0, &mut gal);
+        assert!(stock(&mut gal) as f64 >= usual as f64 * 0.95, "nearly full after half a year");
     }
 }

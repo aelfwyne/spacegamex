@@ -18,6 +18,11 @@ pub const MAX_QUESTS: usize = 3;
 const BOARD_PERIOD_H: f64 = 24.0 * 30.0;
 /// Hours of searching to recover an artifact once docked at its site.
 pub const SEARCH_H: f64 = 6.0;
+/// Once every upgrade is fitted, a delivered artifact pays this share of
+/// its reward again as a bonus...
+const BONUS_SHARE: f64 = 0.25;
+/// ...or, this often (percent, with a colony), a permanent +1% colony gain.
+const BOON_PCT: u64 = 5;
 
 /// What a kept artifact does for you, permanently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +112,7 @@ impl Quest {
     pub fn detail(&self) -> String {
         match (&self.job, self.state) {
             (Job::Recover { site, artifact, reward, .. }, QuestState::Active) => {
-                format!("Dock at {site} and search ({SEARCH_H:.0} h). Then return it to {} for {reward:.0} cr and a ship upgrade, or keep it: {}.", self.giver_sys_name, artifact.power.describe())
+                format!("Dock at {site} and search ({SEARCH_H:.0} h). Then return it to {} for {reward:.0} cr and a yard upgrade, or keep it: {}.", self.giver_sys_name, artifact.power.describe())
             }
             (Job::Recover { artifact, reward, .. }, QuestState::Recovered) => {
                 format!("The {} is aboard. Deliver it at {} for {reward:.0} cr and an upgrade, or keep it ({}).", artifact.name, self.giver_sys_name, artifact.power.describe())
@@ -257,6 +262,52 @@ impl Sim {
         true
     }
 
+    /// What the giver's yard does for you on top of the reward: the next
+    /// Attack or Defense level; once both are maxed, a quest-only drone
+    /// refit (the ship's mining drones and the colony's Resource Drones in
+    /// turn); once those are maxed too, a cash bonus, or rarely a small
+    /// permanent gain for the colony. Returns a sentence for the log.
+    fn yard_reward(&mut self, quest_id: u64, reward: f64) -> String {
+        use super::colony::MAX_DRONE_LVL;
+        use super::combat::MAX_LEVEL;
+        if self.attack_lvl <= self.defense_lvl && self.attack_lvl < MAX_LEVEL {
+            self.attack_lvl += 1;
+            return format!("Their yard fits Attack level {}.", self.attack_lvl);
+        }
+        if self.defense_lvl < MAX_LEVEL {
+            self.defense_lvl += 1;
+            return format!("Their yard fits Defense level {}.", self.defense_lvl);
+        }
+        let ship_room = self.drone_lvl < MAX_DRONE_LVL;
+        let col_lvl = self.colony.as_ref().map(|c| c.drone_lvl).filter(|&l| l < MAX_DRONE_LVL);
+        match col_lvl {
+            Some(cl) if !ship_room || cl < self.drone_lvl => {
+                let c = self.colony.as_mut().unwrap();
+                c.drone_lvl += 1;
+                return format!(
+                    "Their engineers send plans to refit your colony's Resource Drones: each unit now serves {:.0} colonists (+{}%).",
+                    c.per(super::cargo::Good::ResDrones),
+                    10 * c.drone_lvl
+                );
+            }
+            _ if ship_room => {
+                self.drone_lvl += 1;
+                return format!("Their yard refits your mining drones: yield +{}%.", 10 * self.drone_lvl);
+            }
+            _ => {}
+        }
+        let roll = mix64(self.seed ^ quest_id.rotate_left(29) ^ 0xb0_0e);
+        if let Some(c) = self.colony.as_mut()
+            && roll % 100 < BOON_PCT
+        {
+            let what = c.boons.grant((roll >> 32) as usize);
+            return format!("Nothing left to fit, but their scholars share something rare with your colony: {what}, for good.");
+        }
+        let bonus = (reward * BONUS_SHARE).round();
+        self.credits += bonus;
+        format!("Your ship is fitted with the best they have, so they add a {bonus:.0} cr bonus instead.")
+    }
+
     /// Hand in what a quest asks for, here. `keep`: keep a recovered
     /// artifact for its power instead of delivering it.
     pub fn complete_quest(&mut self, id: u64, keep: bool) -> bool {
@@ -275,16 +326,8 @@ impl Sim {
                     return false;
                 }
                 self.credits += reward;
-                let up = if self.attack_lvl <= self.defense_lvl && self.attack_lvl < super::combat::MAX_LEVEL {
-                    self.attack_lvl += 1;
-                    format!("Attack level {}", self.attack_lvl)
-                } else if self.defense_lvl < super::combat::MAX_LEVEL {
-                    self.defense_lvl += 1;
-                    format!("Defense level {}", self.defense_lvl)
-                } else {
-                    "nothing more to fit".into()
-                };
-                self.log.push(self.t, Level::Good, format!("{} receives the {}: +{reward:.0} cr, and their yard fits {up}.", q.giver, artifact.name));
+                let up = self.yard_reward(q.id, *reward);
+                self.log.push(self.t, Level::Good, format!("{} receives the {}: +{reward:.0} cr. {up}", q.giver, artifact.name));
                 self.stats.artifacts_delivered += 1;
             }
             (Job::Relic { mult }, _) => {
@@ -351,6 +394,57 @@ mod tests {
         gal.system(id).civ = Some(Civ { tier: CivTier::T3, name: "Port".into(), kind: CivKind::Colony, seat: Loc::Planet(0), small: false });
         sim.credits = 0.0;
         (sim, gal)
+    }
+
+    #[test]
+    fn deliveries_upgrade_combat_then_drones_then_pay_a_bonus() {
+        let (mut sim, _gal) = at_port();
+        let y0 = sim.ship().drone_yield;
+        for _ in 0..10 {
+            sim.yard_reward(1, 1000.0);
+        }
+        assert_eq!((sim.attack_lvl, sim.defense_lvl, sim.drone_lvl), (5, 5, 0), "combat first");
+        for _ in 0..5 {
+            sim.yard_reward(1, 1000.0);
+        }
+        assert_eq!(sim.drone_lvl, 5);
+        assert!((sim.ship().drone_yield / y0 - 1.5).abs() < 1e-9);
+        let cr = sim.credits;
+        sim.yard_reward(1, 1000.0);
+        assert_eq!(sim.drone_lvl, 5);
+        assert_eq!(sim.credits, cr + 250.0, "no colony: always the cash bonus");
+    }
+
+    #[test]
+    fn with_a_colony_drone_refits_alternate_and_boons_are_rare() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 2, &mut gal);
+        let home = gal.home_id();
+        let idx = gal.system(home).planets.iter().position(|p| crate::sim::colony::world::colonizable(p).is_ok()).unwrap();
+        sim.shuttle = None;
+        sim.loc = Loc::Planet(idx);
+        sim.found_colony(&mut gal).unwrap();
+        sim.attack_lvl = 5;
+        sim.defense_lvl = 5;
+        let per0 = sim.colony.as_ref().unwrap().per(Good::ResDrones);
+        sim.yard_reward(1, 1000.0);
+        sim.yard_reward(1, 1000.0);
+        assert_eq!((sim.drone_lvl, sim.colony.as_ref().unwrap().drone_lvl), (1, 1));
+        for _ in 0..8 {
+            sim.yard_reward(1, 1000.0);
+        }
+        let c = sim.colony.as_ref().unwrap();
+        assert_eq!((sim.drone_lvl, c.drone_lvl), (5, 5));
+        assert!((c.per(Good::ResDrones) / per0 - 1.5).abs() < 1e-9);
+        assert!(c.units_for(Good::ResDrones, 3000.0) < Good::ResDrones.units_for(3000.0));
+        let cr = sim.credits;
+        for id in 0..2000 {
+            sim.yard_reward(id, 1000.0);
+        }
+        let b = sim.colony.as_ref().unwrap().boons;
+        let n = (b.produce + b.health + b.tech + b.fert) as f64;
+        assert!((40.0..170.0).contains(&n), "about 5% become boons: {n}");
+        assert_eq!(sim.credits, cr + (2000.0 - n) * 250.0);
     }
 
     #[test]

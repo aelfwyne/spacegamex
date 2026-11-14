@@ -98,13 +98,13 @@ impl Good {
 
     pub fn desc(self) -> &'static str {
         match self {
-            Good::HydroKit => "Grows food for 100 colonists. Lasts 50 years.",
-            Good::Recycler => "Recycles air, water and waste for 100 colonists. Lasts 100 years.",
-            Good::ResDrones => "Mines and hauls raw materials for 200 colonists. Lasts 25 years.",
-            Good::AiCluster => "Keeps the knowledge base of 1,000 colonists. Without them a colony's tech level collapses. Lasts 25 years.",
-            Good::PowerGen => "Powers 500 colonists. Without power every other supply works badly. Lasts 50 years.",
-            Good::MedKit => "Medical care for 10 colonists. Lasts 1 year.",
-            Good::HazardDome => "Shelters 25 colonists on a world they cannot live on unprotected. Lasts 50 years.",
+            Good::HydroKit => "Grows food for 100 colonists. Lasts 50 years in use; spares keep.",
+            Good::Recycler => "Recycles air, water and waste for 100 colonists. Lasts 100 years in use; spares keep.",
+            Good::ResDrones => "Mines and hauls raw materials for 200 colonists. Lasts 25 years in use; spares keep.",
+            Good::AiCluster => "Keeps the knowledge base of 1,000 colonists. Without them a colony's tech level collapses. Lasts 25 years in use; spares keep.",
+            Good::PowerGen => "Powers 500 colonists. Without power every other supply works badly. Lasts 50 years in use; spares keep.",
+            Good::MedKit => "Medical care for 10 colonists. Lasts 5 years in use; spares keep.",
+            Good::HazardDome => "Shelters 25 colonists on a world they cannot live on unprotected. Lasts 50 years in use; spares keep.",
             Good::GeneKit => "Lets a human and a native partner have children: the colony becomes Hybrid.",
             Good::Machinery => "Industrial machinery. Wanted everywhere that builds.",
             Good::Electronics => "Processors, sensors and control systems.",
@@ -141,7 +141,7 @@ impl Good {
             Good::ResDrones => 2_500.0,
             Good::AiCluster => 15_000.0,
             Good::PowerGen => 6_000.0,
-            Good::MedKit => 150.0,
+            Good::MedKit => 450.0,
             Good::HazardDome => 2_000.0,
             Good::GeneKit => 10_000.0,
             Good::Machinery => 900.0,
@@ -166,7 +166,7 @@ impl Good {
             Good::ResDrones => (200.0, 25.0),
             Good::AiCluster => (1_000.0, 25.0),
             Good::PowerGen => (500.0, 50.0),
-            Good::MedKit => (10.0, 1.0),
+            Good::MedKit => (10.0, 5.0),
             Good::HazardDome => (25.0, 50.0),
             _ => return None,
         };
@@ -242,7 +242,14 @@ pub struct Offer {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CargoMarket {
     pub offers: BTreeMap<Good, Offer>,
+    /// Game time (s) the stock was last topped up.
+    #[serde(default)]
+    pub stocked_t: f64,
 }
+
+/// Market stock recovers toward its usual level with this time constant
+/// (days): about two thirds of a shortfall is back within a month.
+pub const RESTOCK_DAYS: f64 = 30.0;
 
 /// Sellers keep this share of the price as their margin: you pay `price`
 /// and receive `price * SELL_SPREAD`.
@@ -328,7 +335,35 @@ impl CargoMarket {
             let stock = if sells { (typical * stock_scale * rng.random_range(0.5..1.5)).round().max(1.0) as u32 } else { 0 };
             offers.insert(g, Offer { price, stock, sells, buys });
         }
-        CargoMarket { offers }
+        CargoMarket { offers, stocked_t: 0.0 }
+    }
+
+    /// Suppliers bring in more of what this port sells: stock below its
+    /// usual level (`usual`, a freshly generated market) recovers over time.
+    /// Fractions carry over, so slow trickles are not lost to rounding.
+    pub fn restock(&mut self, usual: &CargoMarket, t: f64) {
+        let days = (t - self.stocked_t) / super::people::SECS_PER_DAY;
+        if days < 1.0 {
+            return;
+        }
+        let k = 1.0 - (-days / RESTOCK_DAYS).exp();
+        let mut changed = false;
+        for (g, o) in self.offers.iter_mut() {
+            let Some(u) = usual.offers.get(g).filter(|u| u.sells && o.sells) else { continue };
+            if o.stock < u.stock {
+                let add = ((u.stock - o.stock) as f64 * k).floor() as u32;
+                if add > 0 {
+                    o.stock += add;
+                    changed = true;
+                }
+            }
+        }
+        // Nothing grew (small shortfalls, short waits): keep counting from
+        // the same moment so the time is not lost.
+        let short = self.offers.iter().any(|(g, o)| usual.offers.get(g).is_some_and(|u| u.sells && o.sells && o.stock < u.stock));
+        if changed || !short {
+            self.stocked_t = t;
+        }
     }
 }
 

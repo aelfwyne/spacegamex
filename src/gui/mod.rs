@@ -33,6 +33,9 @@ pub struct View {
     pub map_pan: egui::Vec2,
     pub map_zoom: f32,
     pub last_map_sel: usize,
+    /// The star map's side list shows visited systems (any range) instead
+    /// of the nearby ones.
+    pub map_visited: bool,
     pub seed_text: String,
     /// System-view camera: zoom multiplier, pan (px), framing, and the
     /// system it was set up for (reset on arrival somewhere new).
@@ -55,6 +58,7 @@ impl Default for View {
             map_pan: egui::Vec2::ZERO,
             map_zoom: 0.0,
             last_map_sel: usize::MAX,
+            map_visited: false,
             seed_text: String::new(),
             sys_zoom: 1.0,
             sys_pan: egui::Vec2::ZERO,
@@ -349,10 +353,7 @@ fn planet_colony_notes(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             ui.label(dim(hab.describe()));
         });
     }
-    if let Some(c) = &sim.colony
-        && c.sys_id == sim.sys_id
-        && c.loc == body
-    {
+    if let Some(c) = sim.all_colonies().find(|c| c.sys_id == sim.sys_id && c.loc == body) {
         ui.label(RichText::new(format!("Your colony {} is here.", c.name)).color(GOOD).strong());
     }
     for q in &sim.quests {
@@ -439,6 +440,14 @@ fn top_bar(ui: &mut Ui, app: &App, sim: &Sim, acts: &mut Vec<Action>) {
             ui.label(loc_label(sim.loc, sys));
             if let Some(leg) = &sim.shuttle {
                 ui.label(RichText::new(format!("→ {} ({})", loc_label(leg.to, sys), fmt_hours(leg.remaining_h))).color(WARN));
+                if leg.to != sim.loc
+                    && ui
+                        .small_button("Turn back")
+                        .on_hover_text(format!("Head back to {} from where the ship is now. Double-click any other place to change course.", loc_label(sim.loc, sys)))
+                        .clicked()
+                {
+                    acts.push(Action::ShuttleTo(sim.loc));
+                }
             }
             if let Some(civ) = &sys.civ {
                 let what = match civ.tier {
@@ -709,7 +718,7 @@ mod smoke_tests {
             }
             app.apply(Action::RandomParent);
             for &(w, h) in &[(800.0f32, 500.0f32), (1280.0, 800.0), (320.0, 240.0)] {
-                for tab in [ColonyTab::Overview, ColonyTab::Supplies, ColonyTab::Build, ColonyTab::Census, ColonyTab::Family, ColonyTab::Laws, ColonyTab::Market] {
+                for tab in [ColonyTab::Overview, ColonyTab::Supplies, ColonyTab::Build, ColonyTab::Census, ColonyTab::Family, ColonyTab::Laws, ColonyTab::Market, ColonyTab::Fleet] {
                     app.apply(Action::SetColonyTab(tab));
                     app.screen = Screen::Cockpit;
                     frame(&ctx, &app, &mut view, w, h);
@@ -740,6 +749,98 @@ mod smoke_tests {
             assert_eq!(app.screen, Screen::GameOver);
             frame(&ctx, &app, &mut view, 1280.0, 800.0);
         }
+    }
+
+    /// Under Hegemony the victory screen lets the dynasty rule on: the
+    /// colony stays, play continues and the screen does not come back.
+    /// Also draws the interstellar shipyard with a colony (fleet option).
+    #[test]
+    fn hegemony_continues_the_royal_lineage() {
+        use crate::sim::civ::{Civ, CivKind, CivTier};
+        use crate::sim::colony::{law, world};
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut view = View::default();
+        let mut app = App::with_game(42, 2);
+        let home = app.gal.home_id();
+        let idx = app.gal.system(home).planets.iter().position(|p| world::colonizable(p).is_ok()).unwrap();
+        app.sim.as_mut().unwrap().loc = crate::sim::Loc::Planet(idx);
+        app.apply(Action::FoundColony);
+        app.apply(Action::FoundColony);
+        // Without Hegemony the lineage cannot continue.
+        app.sim.as_mut().unwrap().colony.as_mut().unwrap().won = true;
+        app.tick(0.1);
+        assert_eq!(app.screen, Screen::Victory);
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
+        app.apply(Action::ContinueLineage);
+        assert_eq!(app.screen, Screen::Victory);
+        app.sim.as_mut().unwrap().colony.as_mut().unwrap().laws.push(law::Enacted { law: law::Law::Hegemony, since: 0.0 });
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
+        app.apply(Action::ContinueLineage);
+        assert_ne!(app.screen, Screen::Victory);
+        assert!(app.sim().colony.is_some() && app.sim().over.is_none());
+        app.tick(0.1);
+        assert_ne!(app.screen, Screen::Victory, "asked once");
+        // A later retirement still scores as a victory.
+        app.sim.as_mut().unwrap().retire_now();
+        assert_eq!(app.sim().outcome(), crate::sim::score::Outcome::Victory);
+        app.sim.as_mut().unwrap().over = None;
+        // The port shipyard, with a colony to send a fleet ship to.
+        app.gal.system(home).civ = Some(Civ { tier: CivTier::T3, name: "Test".into(), kind: CivKind::Colony, seat: crate::sim::Loc::Star, small: false });
+        app.apply(Action::LeaveColony);
+        app.sim.as_mut().unwrap().credits = 1e6;
+        app.apply(Action::SetTradeTab(crate::game::TradeTab::Port));
+        app.screen = Screen::Trade;
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
+        app.apply(Action::BuyShip(1, true));
+        assert_eq!(app.sim().fleet.len(), 1);
+        app.apply(Action::SetColonyTab(crate::game::ColonyTab::Fleet));
+        app.screen = Screen::Colony;
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
+        app.apply(Action::SwitchShip(0));
+        assert_eq!(app.sim().ship_idx, 1);
+    }
+
+    /// Two colonies: the selector, the map markers, and colony actions
+    /// landing on the colony on screen.
+    #[test]
+    fn several_colonies_switch_and_act_on_the_selected_one() {
+        use crate::sim::colony::{law, world, Project};
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut view = View::default();
+        let mut app = App::with_game(42, 2);
+        let home = app.gal.home_id();
+        let idx = app.gal.system(home).planets.iter().position(|p| world::colonizable(p).is_ok()).unwrap();
+        app.sim.as_mut().unwrap().loc = crate::sim::Loc::Planet(idx);
+        app.apply(Action::FoundColony);
+        app.apply(Action::FoundColony);
+        // A second colony, as founding under Hegemony would leave it.
+        {
+            let sim = app.sim.as_mut().unwrap();
+            sim.colony.as_mut().unwrap().laws.push(law::Enacted { law: law::Law::Hegemony, since: 0.0 });
+            let mut out = sim.colony.clone().unwrap();
+            out.outpost = true;
+            out.name = "Second".into();
+            out.queue.clear();
+            out.sys_id = app.map_list.first().map_or(home, |n| n.id);
+            sim.outposts.push(out);
+            sim.in_colony = false;
+        }
+        app.apply(Action::SelectColony(1));
+        assert_eq!(app.sel_colony, 1);
+        app.apply(Action::SetColonyTab(crate::game::ColonyTab::Build));
+        app.screen = Screen::Colony;
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
+        let q0 = app.sim().colony.as_ref().unwrap().queue.len();
+        app.apply(Action::Build(Project::Pmp));
+        assert_eq!(app.sim().outposts[0].queue.len(), 1, "built at the selected colony");
+        assert_eq!(app.sim().colony.as_ref().unwrap().queue.len(), q0, "not at the capital");
+        assert!(!app.sim().colony.as_ref().unwrap().outpost);
+        app.screen = Screen::Map;
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
+        app.apply(Action::SelectColony(0));
+        frame(&ctx, &app, &mut view, 1280.0, 800.0);
     }
 
     /// Retiring asks twice, ends the game even with a colony standing,

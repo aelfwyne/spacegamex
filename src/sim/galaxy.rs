@@ -140,6 +140,27 @@ impl Galaxy {
         self.cache.get(&id).unwrap()
     }
 
+    /// Chart facts for one system, with its distance from `from`.
+    pub fn neighbor(&mut self, id: u64, from: [f64; 2]) -> Neighbor {
+        let sys = self.system(id);
+        let dx = sys.pos[0] - from[0];
+        let dy = sys.pos[1] - from[1];
+        Neighbor {
+            id,
+            pos: sys.pos,
+            dist_ly: (dx * dx + dy * dy).sqrt(),
+            star_name: sys.star.name.clone(),
+            star_class: sys.star.class.glyph(),
+            class: sys.star.class,
+            giant: sys.star.giant(),
+            civ: sys.civ.as_ref().map(|c| c.tier),
+            civ_kind: sys.civ.as_ref().map(|c| c.kind),
+            binary: sys.companion.is_some(),
+            n_planets: sys.planets.len(),
+            richness: sys.richness(),
+        }
+    }
+
     /// All systems within `radius` ly of `pos`, nearest first. Excludes `exclude`.
     pub fn neighbors(&mut self, pos: [f64; 2], radius: f64, exclude: u64) -> Vec<Neighbor> {
         let (cx0, cy0) = ((pos[0] / CELL).floor() as i64, (pos[1] / CELL).floor() as i64);
@@ -151,25 +172,9 @@ impl Galaxy {
                     if id == exclude {
                         continue;
                     }
-                    let sys = self.system(id);
-                    let dx = sys.pos[0] - pos[0];
-                    let dy = sys.pos[1] - pos[1];
-                    let d = (dx * dx + dy * dy).sqrt();
-                    if d <= radius {
-                        out.push(Neighbor {
-                            id,
-                            pos: sys.pos,
-                            dist_ly: d,
-                            star_name: sys.star.name.clone(),
-                            star_class: sys.star.class.glyph(),
-                            class: sys.star.class,
-                            giant: sys.star.giant(),
-                            civ: sys.civ.as_ref().map(|c| c.tier),
-                            civ_kind: sys.civ.as_ref().map(|c| c.kind),
-                            binary: sys.companion.is_some(),
-                            n_planets: sys.planets.len(),
-                            richness: sys.richness(),
-                        });
+                    let n = self.neighbor(id, pos);
+                    if n.dist_ly <= radius {
+                        out.push(n);
                     }
                 }
             }

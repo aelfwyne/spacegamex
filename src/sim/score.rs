@@ -45,6 +45,8 @@ impl Sim {
     pub fn outcome(&self) -> Outcome {
         match self.over.as_ref().map(|o| o.cause.as_str()) {
             Some("Victory") => Outcome::Victory,
+            // A dynasty that reached a million and ruled on still won.
+            Some(RETIRED) if self.colony.as_ref().is_some_and(|c| c.won) => Outcome::Victory,
             Some(RETIRED) => Outcome::Retired,
             _ => Outcome::Lost,
         }

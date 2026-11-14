@@ -95,6 +95,19 @@ impl Person {
     }
 }
 
+/// Someone who left on a colony ark, as their new world will know them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Emigrant {
+    pub female: bool,
+    /// Birth date (game years).
+    pub born: f32,
+    pub given: String,
+    pub family: String,
+    /// Of the captain's royal line.
+    pub royal: bool,
+    pub alien: bool,
+}
+
 /// Per-year rates the colony's conditions set for this step.
 #[derive(Debug, Clone, Copy)]
 pub struct Rates {
@@ -171,6 +184,9 @@ pub struct Census {
     /// Family names fixed by the story (the captain's), by line founder.
     #[serde(default)]
     pub family: std::collections::BTreeMap<u32, String>,
+    /// Records who left on a colony ark, and when (game years).
+    #[serde(default)]
+    pub emigrated: std::collections::BTreeMap<u32, f32>,
     /// Added to the yearly chance that singles pair up (laws).
     #[serde(default)]
     pub pair_bonus: f64,
@@ -215,6 +231,95 @@ impl Census {
         }
         self.people.push(p);
         id
+    }
+
+    /// Living and still here (not gone on an ark).
+    pub fn here(&self, id: u32) -> bool {
+        self.get(id).is_some_and(|p| p.alive()) && !self.emigrated.contains_key(&id)
+    }
+
+    /// Send `n` people away on an ark: the records in `first` (with their
+    /// partners, unless a partner is in `keep`), then adults from the
+    /// anonymous bulk, then other adult records not in `keep`.
+    pub fn emigrate(&mut self, first: &[u32], n: usize, keep: &std::collections::BTreeSet<u32>, now: f64) -> Vec<Emigrant> {
+        let mut out = Vec::new();
+        let take = |c: &mut Census, id: u32, out: &mut Vec<Emigrant>| {
+            if out.len() >= n || !c.here(id) || keep.contains(&id) {
+                return;
+            }
+            let p = c.people[id as usize].clone();
+            out.push(Emigrant { female: p.female, born: p.born, given: c.given_name(id), family: c.family_name(id), royal: p.line, alien: p.alien });
+            c.emigrated.insert(id, now as f32);
+            c.living.retain(|&i| i != id);
+        };
+        for &id in first {
+            take(self, id, &mut out);
+            if let Some(sp) = self.people.get(id as usize).and_then(|p| p.spouse) {
+                if keep.contains(&sp) {
+                    // Parted: the one who stays may marry again.
+                    self.people[sp as usize].spouse = None;
+                } else {
+                    take(self, sp, &mut out);
+                }
+            }
+        }
+        // The anonymous bulk: adults, in proportion to who is there.
+        let adults = |c: &Census| -> f64 { c.cohorts.iter().enumerate().filter(|(a, _)| (18..=45).contains(a)).map(|(_, v)| v[0] + v[1]).sum() };
+        let mut rng = self.rng(0xa7_c5);
+        while out.len() < n && adults(self) >= 1.0 {
+            let mut r = rng.random_range(0.0..adults(self));
+            let mut pick = None;
+            'find: for a in 18..=45usize {
+                for sex in 0..2 {
+                    let v = self.cohorts[a][sex];
+                    if r < v && v >= 1.0 {
+                        pick = Some((a, sex));
+                        break 'find;
+                    }
+                    r -= v;
+                }
+            }
+            let Some((a, sex)) = pick else { break };
+            self.cohorts[a][sex] -= 1.0;
+            let mut nr = derive(self.seed ^ 0xe1_9a, self.draws.wrapping_add(out.len() as u64));
+            out.push(Emigrant {
+                female: sex == 1,
+                born: (now - a as f64 - rng.random_range(0.0..1.0)) as f32,
+                given: crate::rngx::name(&mut nr),
+                family: crate::rngx::name(&mut nr),
+                royal: false,
+                alien: false,
+            });
+        }
+        // A small colony is all records: take adults at random (not of the
+        // royal line: its share was chosen above).
+        if out.len() < n {
+            let mut ids: Vec<u32> = self
+                .living
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let p = &self.people[i as usize];
+                    !keep.contains(&i) && !p.line && (18.0..46.0).contains(&p.age(now))
+                })
+                .collect();
+            for k in (1..ids.len()).rev() {
+                ids.swap(k, rng.random_range(0..=k));
+            }
+            for id in ids {
+                take(self, id, &mut out);
+            }
+        }
+        // Partners left behind are free to marry again.
+        let living = self.living.clone();
+        for i in living {
+            if let Some(sp) = self.people[i as usize].spouse
+                && self.emigrated.contains_key(&sp)
+            {
+                self.people[i as usize].spouse = None;
+            }
+        }
+        out
     }
 
     pub fn cohort_total(&self) -> f64 {

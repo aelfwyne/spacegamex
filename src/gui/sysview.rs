@@ -265,10 +265,20 @@ pub fn draw(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
         }
     };
     if let Some(leg) = &sim.shuttle {
-        if let (Some((a, ar)), Some((b, br))) = (loc_at(sim.loc), loc_at(leg.to)) {
+        // Where this leg began: the departure world, or the point where
+        // the ship last changed course.
+        let start = loc_at(sim.loc).map(|(mut p, r)| {
+            for &(to, f) in &leg.path {
+                if let Some((q, _)) = loc_at(to) {
+                    p += (q - p) * f as f32;
+                }
+            }
+            (p, if leg.path.is_empty() { r } else { 0.0 })
+        });
+        if let (Some((a, ar)), Some((b, br))) = (start, loc_at(leg.to)) {
             let dir = (b - a).normalized();
             let (a, b) = (a + dir * (ar + 6.0), b - dir * (br + 6.0));
-            let prog = (1.0 - leg.remaining_h / leg.total_h.max(1e-9)).clamp(0.0, 1.0) as f32;
+            let prog = leg.progress() as f32;
             let at = a + (b - a) * prog;
             painter.extend(egui::Shape::dashed_line(&[at, b], Stroke::new(1.2, WARN), 6.0, 5.0));
             paint::ship(&painter, at, dir, 7.0, GOOD);
@@ -297,7 +307,7 @@ pub fn draw(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
     painter.text(
         rect.right_bottom() + vec2(-10.0, -8.0),
         Align2::RIGHT_BOTTOM,
-        "click: select   double-click: shuttle   drag: pan   wheel: zoom   ◆ natives  ■ colony  ✕ salvage",
+        "click: select   double-click: shuttle (also mid-flight, to change course)   drag: pan   wheel: zoom   ◆ natives  ■ colony  ✕ salvage",
         FontId::proportional(11.5),
         DIM,
     );
@@ -468,7 +478,7 @@ fn footer(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
             acts.push(Action::StepPlanet(1));
         }
         if let Some(p) = sys.site(sel) {
-            let at = sim.loc == sel;
+            let at = sim.loc == sel && sim.shuttle.is_none();
             ui.label(RichText::new(&p.name).strong().color(KEY));
             let mut info = format!("{} · {:.2} AU", p.kind_label(), p.au);
             if p.class != PlanetClass::AsteroidBelt {

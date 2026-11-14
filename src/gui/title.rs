@@ -7,7 +7,7 @@ use crate::game::{Action, App, Screen};
 use crate::sim::background::Captain;
 use crate::sim::save;
 use crate::sim::score::{self, Outcome};
-use crate::sim::{fmt_daytime, fmt_kg, Abundance, Background, GalaxyOpts, Risk, Sex, SHIPS};
+use crate::sim::{fmt_daytime, fmt_kg, Abundance, Background, GalaxyOpts, Risk, Sex, SHIPS, STARTERS};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, RichText, Sense, Shape, Stroke, Ui};
 
 /// The galaxy option rows under the title buttons. Each change rebuilds the
@@ -93,7 +93,7 @@ pub fn title(ui: &mut Ui, app: &App, view: &mut View, acts: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             let total = card_w * 3.0 + 2.0 * ui.spacing().item_spacing.x + 30.0;
             ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-            for (i, sh) in SHIPS.iter().enumerate() {
+            for (i, sh) in SHIPS[..STARTERS].iter().enumerate() {
                 let sel = app.title_sel == i;
                 let frame = card_frame()
                     .stroke(Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { KEY } else { Color32::from_rgb(40, 52, 75) }))
@@ -196,7 +196,7 @@ fn captain_popup(ctx: &egui::Context, app: &App, view: &mut View, acts: &mut Vec
         view.cap_given = g;
         view.cap_surname = s;
     }
-    let ship = SHIPS[app.title_sel.min(SHIPS.len() - 1)];
+    let ship = SHIPS[app.title_sel.min(STARTERS - 1)];
     egui::Window::new(RichText::new("YOUR CAPTAIN").strong().color(ACCENT))
         .collapsible(false)
         .resizable(false)
@@ -234,17 +234,20 @@ fn captain_popup(ctx: &egui::Context, app: &App, view: &mut View, acts: &mut Vec
                     let r = card_frame()
                         .stroke(Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { KEY } else { Color32::from_rgb(40, 52, 75) }))
                         .show(ui, |ui| {
-                            ui.set_width(250.0);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(b.name()).strong().color(if sel { KEY } else { TEXT }));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(format!("+{:.0} cr", b.money())).color(GOOD));
+                            // Grid cells lay out horizontally; the card's lines must stack.
+                            ui.vertical(|ui| {
+                                ui.set_width(250.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(b.name()).strong().color(if sel { KEY } else { TEXT }));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(RichText::new(format!("+{:.0} cr", b.money())).color(GOOD));
+                                    });
                                 });
+                                ui.add(egui::Label::new(dim(b.blurb())).wrap());
+                                for bonus in b.bonuses() {
+                                    ui.add(egui::Label::new(format!("•  {bonus}")).wrap());
+                                }
                             });
-                            ui.label(dim(b.blurb()));
-                            for bonus in b.bonuses() {
-                                ui.label(format!("•  {bonus}"));
-                            }
                         })
                         .response
                         .interact(Sense::click());

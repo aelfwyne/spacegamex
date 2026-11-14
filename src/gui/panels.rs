@@ -41,7 +41,7 @@ fn focus_combo(ui: &mut Ui, sim: &Sim, acts: &mut Vec<Action>) {
             }
         })
         .response
-        .on_hover_text("Fab bay priority  [3]. Every non-idle focus runs life support first.");
+        .on_hover_text("Fab bay priority  [3]. Every focus but Idle first makes what the crew is using. Then: Life support fills water, O2 and food; Repair fills MAT; Medical fills medicine; Stockpile tops up every tank evenly from the mining surplus.");
 }
 
 // ------------------------------------------------------------ cockpit column
@@ -174,6 +174,11 @@ fn people_rows(ui: &mut Ui, sim: &Sim, w: f32) {
         bar(ui, sim.crew.health / 100.0, format!("health {:.0}", sim.crew.health), w / 2.0 - 6.0);
         bar_colored(ui, sim.crew.morale / 100.0, format!("morale {:.0}", sim.crew.morale), w / 2.0 - 6.0, if sim.crew.morale < 40.0 { WARN } else { ACCENT });
     });
+    if !sim.new_ship_boost.is_empty() {
+        let left: Vec<&str> = sim.new_ship_boost.iter().map(|r| r.name()).collect();
+        ui.label(RichText::new(format!("New Ship Morale Boost: low {} won't worry the crew until it first passes half a tank.", left.join(", "))).small().color(GOOD))
+            .on_hover_text("On a new ship, empty tanks are normal. Once a store has been filled past half, running it low counts against morale as usual.");
+    }
     if sim.pax.count > 0 {
         ui.label(format!("Passengers {}", sim.pax.count));
         ui.horizontal(|ui| {
@@ -268,7 +273,7 @@ pub fn planet(ui: &mut Ui, app: &App, view: &View, acts: &mut Vec<Action>) {
         _ => Loc::Planet(pi),
     };
     let Some(p) = sys.site(loc) else { return };
-    let at = sim.loc == loc;
+    let at = sim.loc == loc && sim.shuttle.is_none();
 
     ui.horizontal_wrapped(|ui| {
         if ui.button("◀ Prev  [←]").clicked() {
@@ -1046,8 +1051,15 @@ fn trade_cargo(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
             ui.label(if have > 0 { have.to_string() } else { "—".into() });
             ui.label(buy.map(|p| format!("{p:.0}")).unwrap_or_else(|| "—".into()));
             ui.label(sell.map(|p| format!("{p:.0}")).unwrap_or_else(|| "—".into()));
-            let stock = market.offers.get(g).map(|o| o.stock).unwrap_or(0);
-            ui.label(if buy.is_some() { stock.to_string() } else { "—".into() });
+            let offer = market.offers.get(g);
+            let stock = offer.map(|o| o.stock).unwrap_or(0);
+            if buy.is_some() {
+                ui.label(stock.to_string());
+            } else if offer.is_some_and(|o| o.sells) {
+                ui.label(RichText::new("sold out").color(WARN)).on_hover_text("Suppliers restock it over the coming weeks.");
+            } else {
+                ui.label("—");
+            }
             if ui.add_enabled(buy.is_some(), egui::Button::new("Buy").small()).on_hover_text("[B] on the selected row").clicked() {
                 acts.push(Action::TradeSelect(i));
                 acts.push(Action::BuyGood(*g));
@@ -1179,6 +1191,9 @@ fn trade_port(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     section(ui, "WEAPONS AND ARMOUR");
     let (a, d) = sim.combat_stats();
     ui.label(format!("Attack {a:.1} (level {}) · Defense {d:.1} (level {}) · battles won {} / lost {}", sim.attack_lvl, sim.defense_lvl, sim.battles_won, sim.battles_lost));
+    if sim.drone_lvl > 0 {
+        ui.label(format!("Mining drones refitted: yield +{}% (from delivered artifacts).", 10 * sim.drone_lvl));
+    }
     if sim.pending_bounty > 0.0 {
         ui.label(RichText::new(format!("Bounty owed to you: {:.0} cr (paid at any planetary or interstellar port).", sim.pending_bounty)).color(GOOD));
     }
@@ -1196,6 +1211,13 @@ fn trade_port(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         ui.label(dim("Weapons and armour are fitted at interstellar (T3) shipyards."));
     }
     ui.add_space(8.0);
+    section(ui, "SHIPYARD");
+    if tier == CivTier::T3 {
+        ship_market(ui, app, acts);
+    } else {
+        ui.label(dim("New ships are sold at interstellar (T3) shipyards."));
+    }
+    ui.add_space(8.0);
     section(ui, "HIRE A PILOT");
     match &sim.pilot {
         Some(p) => {
@@ -1209,6 +1231,60 @@ fn trade_port(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
                 acts.push(Action::HirePilot);
             }
         }
+    }
+}
+
+/// Hulls on sale at an interstellar port: trade the old ship in, or keep
+/// it and send the new one to the colony's fleet.
+fn ship_market(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
+    use crate::sim::shipyard::Purchase;
+    use crate::sim::SHIPS;
+    let sim = app.sim();
+    let sale = sim.ships_for_sale(&app.gal);
+    let tradein = sim.trade_in_value();
+    ui.label(dim(format!(
+        "Trade-in for your {}: {tradein:.0} cr. {}",
+        sim.ship().name,
+        if sim.colony.is_some() { "Or keep it: a ship added to your fleet is ferried to your colony, where you can switch ships." } else { "With a colony you could keep it and build a fleet instead." }
+    )));
+    for idx in sale {
+        let s = &SHIPS[idx];
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(s.name).strong().color(if idx == sim.ship_idx { GOOD } else { TEXT }));
+                ui.label(dim(format!("{} · {:.0} cr", s.role.name(), s.price * sim.background.buy_mult())));
+            });
+            ui.label(dim(s.blurb));
+            ui.label(dim(format!(
+                "crew {} · hull {:.0} · hold {:.0} t · H2 tank {} · FTL {:.0} ly/h · attack {:.1} / defense {:.1}",
+                s.crew,
+                s.hull,
+                s.cargo_t,
+                fmt_kg(s.tanks[0].1),
+                s.ftl_speed,
+                s.attack,
+                s.defense
+            )));
+            ui.horizontal_wrapped(|ui| {
+                for (how, fleet) in [(Purchase::TradeIn, false), (Purchase::Fleet, true)] {
+                    let q = sim.ship_quote(&app.gal, idx, how);
+                    let label = match (&q, fleet) {
+                        (Ok(p), false) => format!("Trade in ({p:.0} cr)"),
+                        (Ok(p), true) => format!("Add to fleet ({p:.0} cr)"),
+                        (Err(_), false) => "Trade in".into(),
+                        (Err(_), true) => "Add to fleet".into(),
+                    };
+                    let mut r = ui.add_enabled(q.is_ok(), egui::Button::new(label));
+                    if let Err(e) = &q {
+                        r = r.on_disabled_hover_text(e.clone());
+                    }
+                    if r.clicked() {
+                        acts.push(Action::BuyShip(idx, fleet));
+                    }
+                }
+            });
+        });
     }
 }
 
@@ -1246,6 +1322,21 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         "Your background (chosen at New game) gave you credits and two lasting bonuses; see the Crew screen.",
         "Retire whenever you like (Crew screen or the colony Overview). Winning, losing and retiring all score you, and the Scoreboard (title, S) keeps the best 100.",
         "Statistics (L) count almost everything you do, the records you have seen, and every kind of thing you have found.",
+        "Under the Hegemony law, a million is not the end: when the colony gets there you may continue the Royal Lineage and keep playing.",
+        "Hegemony also builds an empire: found further colonies with settlers (your family stays at the capital, so you need crew or passengers), and buy colony arks at interstellar ports, 500 settlers aboard. The Colony screen and the star map switch between your colonies.",
+        "A colony shipyard can build an Ark: it sails with 500 of that colony's own people, and a share of the royal line if any live there (your heirs always stay at the capital). Colonies after the first keep their people by age band; anyone you look at is made individual on the spot.",
+    ] {
+        ui.label(format!("•  {t}"));
+    }
+    ui.add_space(8.0);
+    section(ui, "SHIPS AND THE FLEET");
+    for t in [
+        "Interstellar (T3) ports sell ships (Trade › Port): every one has the Company ship for 100,000 cr, plus its own pick of fighters and freighters. The Ark is never for sale.",
+        "Trade in your ship against the price (it fetches up to 40% of its value, less for damage and drive wear), or, if you have a colony, pay in full and keep both: the new ship is ferried to the colony.",
+        "A traded-in ship's stores move to the new one as they are: nothing is added. A ship bought for the fleet or built at the colony arrives with only three days of air, water, food and fuel for its crew.",
+        "New Ship Morale Boost: on a new ship, empty tanks are normal. Low oxygen, water or food don't hurt morale until each has first been filled past half a tank; after that, running low worries the crew as usual.",
+        "Every ship keeps its own stores, cargo, crew and fittings. Switch ships at the colony (Colony › Fleet); you, your partner and your pilot move, everything else stays.",
+        "The Shipyard is the colony's crowning building (space dock, Business Center and 250,000 colonists). It builds the three founding designs from the stockpile, and any other design once you buy its blueprints.",
     ] {
         ui.label(format!("•  {t}"));
     }
@@ -1262,8 +1353,9 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     ui.add_space(8.0);
     section(ui, "MOUSE");
     ui.label("System view: click a world or moon to select it, double-click to shuttle there. Drag to pan, scroll to zoom; zoom in (or select a giant) to see its moons.");
+    ui.label("Shuttles can change course mid-flight: double-click (or Shuttle here) another place, or press Turn back on the top bar. The new leg starts where the ship is; fuel already burnt is spent.");
     ui.label("Binary systems: the view buttons frame star A, star B or both; a wide companion is a second star you can shuttle to and scoop.");
-    ui.label("Star map: drag to pan, scroll to zoom, click to select, double-click to set the destination. An orange arrow at the edge points to your colony (click it to pan there); the side panel shows its distance, with Show and Best hop buttons.");
+    ui.label("Star map: drag to pan, scroll to zoom, click to select, double-click to set the destination. An orange arrow at the edge points to your colony (click it to pan there); the side panel shows its distance, with Show and Best hop buttons. The Visited tab lists every system you have been to, at any range: tag one as your target (◎, double-click, or the Target button) and a green arrow and side-panel line guide you there the same way.");
     ui.add_space(8.0);
     section(ui, "KEYS");
     let keys = [
