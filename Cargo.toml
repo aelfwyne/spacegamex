@@ -34,3 +34,7 @@ opt-level = 2
 # Windows .exe icon + version info (used only when the target is Windows).
 ico = "0.6.0"
 winresource = "0.1.34"
+
+[profile.release]
+# Drop debug symbols from shipped binaries (about 25-30% smaller).
+strip = true
