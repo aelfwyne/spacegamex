@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-11-14
 
 ### Fixes
 - **Space dock purchases go to the ship's hold** by default. If the ship is
