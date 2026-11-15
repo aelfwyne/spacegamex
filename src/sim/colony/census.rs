@@ -576,14 +576,19 @@ impl Census {
             let female = self.sex_roll();
             let mut rng = self.rng(0xc4_11d);
             let age = (now - b as f64).max(0.0);
-            let a = (age as usize).min(MAX_AGE);
-            let alive = rng.random_bool(survival(age, &Rates::default()).clamp(0.0, 1.0))
-                && self.cohorts.get(a).is_some_and(|c| c[female as usize] >= 1.0);
-            let died = if alive {
-                self.cohorts[a][female as usize] -= 1.0;
-                None
-            } else {
-                Some((b as f64 + rng.random_range(0.0..1.0) * age.max(0.1)) as f32)
+            let a0 = (age as usize).min(MAX_AGE);
+            let lived = rng.random_bool(survival(age, &Rates::default()).clamp(0.0, 1.0));
+            let a = [a0, a0.saturating_sub(1), (a0 + 1).min(MAX_AGE)].into_iter().find(|&a| self.cohorts.get(a).is_some_and(|c| c[female as usize] >= 1.0));
+            let (b, died) = match (lived, a) {
+                (true, Some(a)) => {
+                    self.cohorts[a][female as usize] -= 1.0;
+                    // Born within the year that matches the cohort found.
+                    ((now - a as f64 - rng.random_range(0.0..1.0)).max(self.founded as f64) as f32, None)
+                }
+                // Should be alive, but nobody that age is here: there was
+                // no such child.
+                (true, None) => continue,
+                (false, _) => (b, Some((b as f64 + rng.random_range(0.0..1.0) * age.max(0.1)) as f32)),
             };
             self.add(Person {
                 female,
@@ -635,21 +640,30 @@ impl Census {
         });
         if with_partner && age >= 20 && (with_children || rng.random_bool(0.8)) {
             // A partner of about the same age.
-            let pa = (age as i64 + rng.random_range(-4..=4)).clamp(18, MAX_AGE as i64) as usize;
-            let partner = self.materialize_inner(pa, !female, now, false, false).unwrap_or_else(|| {
-                let b = now - pa as f64;
-                self.conjure(b, !female, false, now)
-            });
+            // Someone who is really here, of about the same age (nobody
+            // nearby: single, not married to an invented dead partner).
+            let pa = (age as i64 + rng.random_range(-4..=4)).clamp(18, MAX_AGE as i64);
+            let Some(partner) = [0i64, 1, -1, 2, -2, 3, -3, 4, -4]
+                .iter()
+                .map(|d| (pa + d).clamp(18, MAX_AGE as i64) as usize)
+                .find_map(|a| self.materialize_inner(a, !female, now, false, false))
+            else {
+                return Some(id);
+            };
             self.people[partner as usize].spouse = Some(id);
             self.people[id as usize].spouse = Some(partner);
             let mother = if female { id } else { partner };
             let mborn = self.people[mother as usize].born as f64;
-            let fertile_years = ((now - mborn).min(FERTILE_END) - 20.0).max(0.0);
-            let mut n = (fertile_years * 0.12 * rng.random_range(0.5..1.6)).round() as usize;
-            if with_children {
+            // Only children born here: what came before belongs to the
+            // world the settlers left.
+            let from = (mborn + 20.0).max(self.founded as f64);
+            let to = now.min(mborn + FERTILE_END);
+            let window = (to - from).max(0.0);
+            let mut n = (window * 0.12 * rng.random_range(0.5..1.6)).round() as usize;
+            if with_children && window > 0.0 {
                 n = n.max(1);
             }
-            let mut kids: Vec<f32> = (0..n).map(|_| (mborn + rng.random_range(20.0..(20.0 + fertile_years.max(0.5)))) as f32).collect();
+            let mut kids: Vec<f32> = (0..n).map(|_| (from + rng.random_range(0.0..window.max(1e-3))) as f32).collect();
             kids.sort_by(|a, b| a.total_cmp(b));
             self.people[mother as usize].unseen = kids;
         }
@@ -681,7 +695,11 @@ impl Census {
             let age = rng.random_range(25..70);
             let female = rng.random_bool(0.5);
             if let Some(id) = self.materialize(age, female, now, true) {
-                return Some(id);
+                let p = &self.people[id as usize];
+                let mother = if p.female { Some(id) } else { p.spouse };
+                if mother.is_some_and(|m| !self.people[m as usize].unseen.is_empty()) {
+                    return Some(id);
+                }
             }
         }
         recs.first().copied()
@@ -1220,6 +1238,39 @@ mod tests {
         assert!(!fertile_pair(&h, &c.people[1]) && !fertile_pair(&h, &c.people[21]));
         assert!(fertile_pair(&h, &Person { female: true, ..h.clone() }));
         assert_eq!(c.count_species(Species::Hybrid), hybrids.iter().filter(|p| p.alive()).count());
+    }
+
+    /// A colony of adult settlers half a year old: looking at people never
+    /// invents relatives who died before it existed (children born before
+    /// it, or a partner nobody of that age could be).
+    #[test]
+    fn a_new_colony_shows_no_invented_dead_relatives() {
+        let now = 100.5;
+        let mut c = Census::new(9, 100.0);
+        c.demographic = true;
+        for a in 16..49 {
+            c.cohorts[a] = [2.0, 2.0];
+        }
+        for k in 0..60 {
+            let id = if k % 2 == 0 { c.random_parent(now) } else { c.materialize(20 + k % 28, k % 3 == 0, now, k % 4 == 0) };
+            let Some(id) = id else { continue };
+            c.ensure_family(id, now);
+            if let Some(sp) = c.people[id as usize].spouse {
+                c.ensure_family(sp, now);
+            }
+        }
+        let mut dead_kids = 0;
+        for p in &c.people {
+            if p.origin == Origin::Born {
+                assert!(p.born >= c.founded, "a child born before the colony: {p:?}");
+                dead_kids += p.died.is_some() as usize;
+            } else {
+                assert!(p.died.is_none(), "invented dead partner: {p:?}");
+            }
+        }
+        // Children of a half-year-old colony are babies, who almost all
+        // survive their first months.
+        assert_eq!(dead_kids, 0);
     }
 
     #[test]
