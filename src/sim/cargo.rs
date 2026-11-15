@@ -105,7 +105,7 @@ impl Good {
             Good::PowerGen => "Powers 500 colonists. Without power every other supply works badly. Lasts 50 years in use; spares keep.",
             Good::MedKit => "Medical care for 10 colonists. Lasts 5 years in use; spares keep.",
             Good::HazardDome => "Shelters 25 colonists on a world they cannot live on unprotected. Lasts 50 years in use; spares keep.",
-            Good::GeneKit => "Lets a human and a native partner have children: the colony becomes Hybrid.",
+            Good::GeneKit => "Lets one human and one native couple have children together. Their children are Hybrids, free colonists who have children only with other Hybrids. Unload into a colony: each year its kits marry single natives to humans, one couple per kit.",
             Good::Machinery => "Industrial machinery. Wanted everywhere that builds.",
             Good::Electronics => "Processors, sensors and control systems.",
             Good::Pharma => "Medicines and biochemicals.",
@@ -113,7 +113,7 @@ impl Good {
             Good::Textiles => "Cloth and fibre. Cheap, bulky, always sells.",
             Good::Artworks => "Handicrafts of pre-space peoples. Collectors pay well.",
             Good::Biologicals => "Rare plants, spores and compounds from living worlds.",
-            Good::Slaves => "Captives bought from pre-space natives. They can work a colony, at a heavy cost to its happiness and health, and cannot have children with humans unless the colony is Hybrid. No spacefaring market will buy them.",
+            Good::Slaves => "Captives bought from pre-space natives. They can work a colony, at a heavy cost to its happiness and health, and cannot have children with humans without a Genetic Modification Kit (one per couple). No spacefaring market will buy them.",
         }
     }
 

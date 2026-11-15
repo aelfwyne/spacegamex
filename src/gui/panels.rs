@@ -1166,27 +1166,35 @@ pub fn quests(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
 
 fn trade_port(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     let sim = app.sim();
-    let Some(tier) = sim.port_tier(&app.gal) else {
-        ui.label(dim("Pre-space peoples have no port: nobody to recruit or hire here."));
-        return;
-    };
-    section(ui, "RECRUIT A PARTNER");
+    let search = sim.partner_search(&app.gal);
+    if search.is_some() || sim.spouse.is_some() {
+        section(ui, "RECRUIT A PARTNER");
+    }
     match &sim.spouse {
         Some(sp) => {
             ui.label(format!("{} ({}, {}) is aboard as your partner.", sp.name, sp.sex.name().to_lowercase(), sp.species_name()));
         }
-        None => {
+        None if let Some((cost, chance, port)) = search => {
             ui.label(dim(format!(
-                "Look for a {} partner willing to leave with you. A partner lets a single captain found a colony, and helps with every job aboard a one-person ship (+10%). A native partner makes the colony Hybrid and needs a Genetic Modification Kit for children.",
+                "Look for a {} partner willing to leave with you. A partner lets a single captain found a colony, and helps with every job aboard a one-person ship (+10%). Partners from a colony are human; a partner from a native people is native, and you need a Genetic Modification Kit to have (Hybrid) children together.",
                 sim.player_sex.opposite().name().to_lowercase()
             )));
-            let cost = crate::sim::commerce::recruit_cost(tier);
-            let chance = if tier == CivTier::T3 { "about 1 in 2" } else { "about 1 in 3" };
-            if ui.add_enabled(sim.credits >= cost, egui::Button::new(format!("Search the port ({cost:.0} cr, 1 h, {chance})"))).clicked() {
+            if !port {
+                ui.label(dim("These people have never seen a starship: few will leave their world with a stranger from the sky."));
+            }
+            let place = if port { "the port" } else { "among the natives" };
+            let odds = format!("about 1 in {:.0}", 1.0 / chance);
+            if ui.add_enabled(sim.credits >= cost, egui::Button::new(format!("Search {place} ({cost:.0} cr, 1 h, {odds})"))).clicked() {
                 acts.push(Action::RecruitPartner);
             }
         }
+        None => {}
     }
+    let Some(tier) = sim.port_tier(&app.gal) else {
+        ui.add_space(8.0);
+        ui.label(dim("Pre-space peoples have no port: no weapons, ships or pilots here."));
+        return;
+    };
     ui.add_space(8.0);
     section(ui, "WEAPONS AND ARMOUR");
     let (a, d) = sim.combat_stats();
@@ -1312,7 +1320,7 @@ pub fn help(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
         "Win by growing a colony to 1,000,000 people. You can only keep one colony at a time.",
         "Colony supplies (hydroponics, recycling, drones, AI clusters, power, medical kits, domes) are cargo: buy them at markets (Trade › Cargo). The Ark starts with a full kit for 500.",
         "Found a colony from the Planets screen while docked at a rocky world or moon. Check its habitability: a lethal world kills anyone without a dome.",
-        "The Keelclipper needs a partner first (Trade › Port › recruit). A native partner makes the colony Hybrid and needs a Genetic Modification Kit for children.",
+        "The Keelclipper needs a partner first (Trade › Port › recruit). Partners from a colony are human; a partner from a native people is native, and you need a Genetic Modification Kit to have (Hybrid) children together.",
         "Few founders start below the galactic tech level and carry a genetic penalty: the long game. AI clusters keep (and slowly raise) the tech level.",
         "A small colony has big families and can live off the land (hunting, gathering, farming: slow, hard labour) on a kind world; a big one needs supplies and comforts to keep growing. Your own couple only has children while you are home.",
         "Supplies wear out. Build a Programmable Manufacturing Plant to make them from raw materials, Bio-Domes on hostile worlds, then a Space Dock and a Business Center.",

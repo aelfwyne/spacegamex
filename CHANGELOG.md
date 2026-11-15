@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Space dock purchases go to the ship's hold** by default. If the ship is
+  not docked at that colony, the purchase is refused with a clear message
+  (nothing is charged); goods go straight into the colony only when you
+  choose *Colony*. They used to be silently redirected to the colony.
+- A new colony's supply, power and shelter readings are up to date at once
+  (they read 0% until its first month had passed).
+
+### Natives, hybrids and Genetic Modification Kits
+- Each colonist is **Human, Native or Hybrid**. A **Genetic Modification
+  Kit** licenses one human and native couple to have children together;
+  their children are Hybrids, free colonists who have children only with
+  other Hybrids. It no longer switches anything on colony-wide.
+- Kits are stocked by the colony (unloaded or bought at the dock) and used
+  as soon as a couple can be made: married human and native couples first
+  (the captain's own first), then single natives married to humans. The
+  Supplies tab lists the kits in store and the licensed couples.
+- A captain's native partner is recorded as a native; only their own
+  descendants are Hybrids.
+- Partners can be sought among **pre-space natives** (about 1 in 10, no
+  port needed). Partners from colonies are always human.
+- The Census tab shows natives and hybrids, with captives (only they weigh
+  on the colony) on the natives' line.
+
+### Hegemony
+- Hegemony is offered at the capital only.
+- **Repealing Hegemony** (with a warning and a second click to confirm)
+  frees every other colony; past a million people the capital sends the
+  captain away too, and they fly on as a roaming captain.
+
 ## 0.7.0 — 2026-11-13
 
 ### Ships and the fleet

@@ -173,9 +173,10 @@ pub struct PlayerColony {
     /// Mineral wealth of the world, 0..1.
     pub richness: f64,
     pub hybrid: bool,
-    /// A Genetic Modification Kit was delivered (Hybrid colonies need one
-    /// before humans and natives can have children).
-    pub gene_kit: bool,
+    /// Genetic Modification Kits in store: each lets one human and one
+    /// native have (hybrid) children, used up yearly as couples marry.
+    #[serde(default)]
+    pub gene_kits: u32,
     pub founders: u32,
     /// Genetic penalty from a small founding population (before fading).
     pub genetic0: f64,
@@ -445,7 +446,37 @@ impl PlayerColony {
             self.step_month(player_home, boost, notes);
             steps += 1;
         }
+        self.refresh_cover();
         self.restock_dock(now);
+    }
+
+    /// What the supplies in store cover right now: (coverage by supply,
+    /// power efficiency, share sheltered).
+    fn supply_cover(&self) -> (BTreeMap<Good, f64>, f64, f64) {
+        let pop = self.population().max(1.0);
+        let cov = |g: Good| -> f64 { (self.units(g) as f64 * self.per(g) / pop).min(1.0) };
+        let power = cov(Good::PowerGen);
+        let eff = 0.25 + 0.75 * power;
+        let mut coverage = BTreeMap::new();
+        coverage.insert(Good::PowerGen, power);
+        for g in [Good::HydroKit, Good::Recycler, Good::ResDrones, Good::AiCluster, Good::MedKit] {
+            coverage.insert(g, cov(g) * eff);
+        }
+        // ---- shelter ----
+        let sheltered = if self.hab.needs_domes() { (self.shelter_capacity(eff) / pop).min(1.0) } else { 1.0 };
+        if self.hab.needs_domes() {
+            coverage.insert(Good::HazardDome, sheltered);
+        }
+        (coverage, eff, sheltered)
+    }
+
+    /// Bring the supply indicators up to date with the store at once (a
+    /// new colony, or supplies just delivered, need not wait a month).
+    pub fn refresh_cover(&mut self) {
+        let (coverage, eff, sheltered) = self.supply_cover();
+        self.ind.coverage = coverage;
+        self.ind.power_eff = eff;
+        self.ind.sheltered = sheltered;
     }
 
     fn step_month(&mut self, player_home: bool, (tech_boost, health_boost): (f64, f64), notes: &mut Vec<Note>) {
@@ -470,23 +501,8 @@ impl PlayerColony {
                 notes.push((Level::Warn, format!("{worn} × {g} wore out.")));
             }
         }
-        let cov = |g: Good, s: &Self| -> f64 {
-            (s.units(g) as f64 * s.per(g) / pop).min(1.0)
-        };
-        let power = cov(Good::PowerGen, self);
-        let eff = 0.25 + 0.75 * power;
-        let mut coverage = BTreeMap::new();
-        coverage.insert(Good::PowerGen, power);
-        for g in [Good::HydroKit, Good::Recycler, Good::ResDrones, Good::AiCluster, Good::MedKit] {
-            coverage.insert(g, cov(g, self) * eff);
-        }
-
-        // ---- shelter ----
-        let sheltered = if self.hab.needs_domes() { (self.shelter_capacity(eff) / pop).min(1.0) } else { 1.0 };
+        let (coverage, eff, sheltered) = self.supply_cover();
         let exposed = 1.0 - sheltered;
-        if self.hab.needs_domes() {
-            coverage.insert(Good::HazardDome, sheltered);
-        }
         let short = |g: Good| 1.0 - coverage[&g];
         // Food: hydroponics, or the land. Hunting and gathering feed a
         // small colony at once; fields take a few years to clear and plant
@@ -596,7 +612,6 @@ impl PlayerColony {
             fert,
             infant: ((0.004 + 0.15 * (1.0 - self.health) + 0.01 * tech_gap + 0.1 * genetic) * fx.infant * bd).clamp(0.001, 0.4),
             maternal: ((0.000_3 + 0.02 * (1.0 - self.health) + 0.002 * tech_gap) * bd).clamp(0.000_05, 0.05),
-            hybrid: self.hybrid && self.gene_kit,
         };
         self.census.pair_bonus = fx.pairing;
         let mut events = Vec::new();
@@ -681,13 +696,22 @@ impl PlayerColony {
             forage: fed_by_land,
         };
 
+        // Kits waiting in store are used as soon as a couple can be made.
+        if self.gene_kits > 0 {
+            let before = self.gene_kits;
+            self.census.use_gene_kits(now, &mut self.gene_kits);
+            if self.gene_kits < before {
+                let k = before - self.gene_kits;
+                notes.push((Level::Good, format!("{k} human-native couple{} licensed with Genetic Modification Kits: their children will be Hybrids.", if k == 1 { "" } else { "s" })));
+            }
+        }
         if self.month == 0 {
             self.yearly(now, notes);
         }
     }
 
     fn yearly(&mut self, now: f64, notes: &mut Vec<Note>) {
-        self.census.yearly(now, self.hybrid && self.gene_kit);
+        self.census.yearly(now, &mut self.gene_kits);
         self.births_total += self.census.last_year.births;
         self.deaths_total += self.census.last_year.deaths;
         let pop = self.population();
@@ -947,7 +971,7 @@ impl Sim {
             }
         }
         if hybrid && !gene_kit {
-            warnings.push("Your partner is a native: without a Genetic Modification Kit you cannot have children together.".into());
+            warnings.push("Your partner is a native: without a Genetic Modification Kit you cannot have children together (bring one later and it is used for you first). Your children will be Hybrids, who have children only with other Hybrids.".into());
         }
         if outpost {
             warnings.push(format!(
@@ -990,6 +1014,8 @@ impl Sim {
             unseen: vec![],
             parents_unseen: false,
             line: true,
+            hybrid: false,
+            licensed: false,
         }));
         if let Some(player) = player {
             census.given.insert(player, self.player_given());
@@ -1006,15 +1032,18 @@ impl Sim {
                 mother: None,
                 father: None,
                 spouse: Some(player),
-                alien: false,
+                alien: sp.species.is_some(),
                 origin: Origin::Founder,
                 due: None,
                 unseen: vec![],
                 parents_unseen: false,
                 line: false,
+                hybrid: false,
+                licensed: plan.hybrid && plan.gene_kit,
             });
             census.given.insert(id, sp.name.clone());
             census.people[player as usize].spouse = Some(id);
+            census.people[player as usize].licensed = plan.hybrid && plan.gene_kit;
             spouse_id = Some(id);
         }
         // The rest of the crew (not the pilot, who stays with the ship),
@@ -1029,7 +1058,7 @@ impl Sim {
         let emigrants: Vec<Emigrant> = self.settlers.iter().take(self.pax.count).cloned().collect();
         let mut leader = None;
         for e in &emigrants {
-            if !outpost || e.royal || e.alien {
+            if !outpost || e.royal || e.alien || e.hybrid {
                 let id = census.add(Person {
                     female: e.female,
                     born: e.born,
@@ -1043,6 +1072,8 @@ impl Sim {
                     unseen: vec![],
                     parents_unseen: false,
                     line: e.royal,
+                    hybrid: e.hybrid,
+                    licensed: false,
                 });
                 census.given.insert(id, e.given.clone());
                 census.family.insert(id, e.family.clone());
@@ -1081,6 +1112,8 @@ impl Sim {
                 unseen: vec![],
                 parents_unseen: false,
                 line: false,
+                hybrid: false,
+                licensed: false,
             });
             if let Some(g) = given {
                 census.given.insert(id, g);
@@ -1094,7 +1127,7 @@ impl Sim {
             let age = rng.random_range(16.0..48.0);
             add(&mut census, None, &mut rng, age);
         }
-        census.yearly(now, false);
+        census.yearly(now, &mut 0);
         census.last_year = Default::default();
         if outpost {
             census.demographic = true;
@@ -1119,7 +1152,7 @@ impl Sim {
             danger,
             richness,
             hybrid: plan.hybrid,
-            gene_kit: plan.hybrid && plan.gene_kit,
+            gene_kits: 0,
             founders: plan.colonists,
             genetic0: (founding_genetic(n) + if plan.hybrid { 0.1 } else { 0.0 }) * self.background.genetic_mult(),
             tech: founding_tech(n),
@@ -1227,10 +1260,10 @@ impl Sim {
                 self.hold.take(g, n);
                 col.add_supply(g, n, now);
                 parts.push(format!("{n} × {g}"));
-            } else if g == Good::GeneKit && col.hybrid && !col.gene_kit {
-                self.hold.take(g, 1);
-                col.gene_kit = true;
-                parts.push("a Genetic Modification Kit".into());
+            } else if g == Good::GeneKit {
+                self.hold.take(g, n);
+                col.gene_kits += n;
+                parts.push(format!("{n} × {g}"));
             } else if g == Good::Slaves {
                 self.hold.take(g, n);
                 let mut rng = crate::rngx::derive(col.census.seed ^ 0x51_a7e5, col.census.people.len() as u64);
@@ -1248,6 +1281,8 @@ impl Sim {
                         unseen: vec![],
                         parents_unseen: false,
                         line: false,
+                        hybrid: false,
+                        licensed: false,
                     });
                 }
                 parts.push(format!("{n} captives"));
@@ -1262,6 +1297,13 @@ impl Sim {
         if t >= 0.01 {
             col.materials += t;
             parts.push(format!("{t:.1} t of raw materials"));
+        }
+        col.refresh_cover();
+        // Kits (new, or waiting for a native) are used at once.
+        let before = col.gene_kits;
+        col.census.use_gene_kits(now, &mut col.gene_kits);
+        if col.gene_kits < before {
+            parts.push(format!("{} human-native couple{} licensed with Genetic Modification Kits", before - col.gene_kits, if before - col.gene_kits == 1 { "" } else { "s" }));
         }
         let msg = if parts.is_empty() { "Nothing to unload.".to_string() } else { format!("Unloaded {}.", parts.join(", ")) };
         self.log.push(self.t, Level::Info, msg.clone());
@@ -1343,13 +1385,7 @@ impl Sim {
             self.log.push(self.t, Level::Warn, format!("The {} ship(s) laid up there stay behind with the colony.", self.fleet.len()));
             self.fleet.clear();
         }
-        let sys = gal.system(c.sys_id);
-        if let Some(p) = sys.site_mut(c.loc) {
-            p.colony = Some(c.as_independent());
-        }
-        sys.civ = crate::sim::worldgen::derive_civ(&sys.planets);
-        sys.market = None;
-        sys.refresh_cargo_market(self.seed);
+        self.set_independent(&c, gal);
         if !c.outpost {
             self.in_colony = false;
         }
@@ -1357,11 +1393,33 @@ impl Sim {
         Ok(())
     }
 
+    /// The colony's world now hosts it as an independent settlement.
+    fn set_independent(&self, c: &PlayerColony, gal: &mut Galaxy) {
+        let sys = gal.system(c.sys_id);
+        if let Some(p) = sys.site_mut(c.loc) {
+            p.colony = Some(c.as_independent());
+        }
+        sys.civ = crate::sim::worldgen::derive_civ(&sys.planets);
+        sys.market = None;
+        sys.refresh_cargo_market(self.seed);
+    }
+
+    /// What repealing Hegemony at the capital would do: (colonies set
+    /// free, whether the captain is cast out of the capital too). None
+    /// when Hegemony is not in force at the capital on screen.
+    pub fn hegemony_repeal_fallout(&self) -> Option<(Vec<String>, bool)> {
+        let c = self.colony.as_ref().filter(|c| !c.outpost && c.laws.iter().any(|e| e.law == law::Law::Hegemony))?;
+        Some((self.outposts.iter().map(|o| o.name.clone()).collect(), c.population() >= WIN_POP))
+    }
+
     /// Put a law in force (costs materials).
     pub fn enact_law(&mut self, l: law::Law) -> Result<(), String> {
         let Some(c) = self.colony.as_mut() else { return Err("You have no colony.".into()) };
         if c.laws.iter().any(|e| e.law == l) {
             return Err(format!("{} is already law.", l.name()));
+        }
+        if l == law::Law::Hegemony && c.outpost {
+            return Err("Hegemony is enacted at your capital: it has no effect at a further colony.".into());
         }
         if let Some(x) = l.conflicts()
             && c.laws.iter().any(|e| e.law == x)
@@ -1380,7 +1438,14 @@ impl Sim {
     }
 
     /// Take a law off the books (not within a year of enacting it).
-    pub fn repeal_law(&mut self, l: law::Law) -> Result<(), String> {
+    /// Repealing Hegemony at the capital ends the dominion: every other
+    /// colony goes its own way, and past a million the capital casts the
+    /// captain out too (who flies on with the ship, colony-less).
+    pub fn repeal_law(&mut self, l: law::Law, gal: &mut Galaxy) -> Result<(), String> {
+        let fallout = if l == law::Law::Hegemony { self.hegemony_repeal_fallout() } else { None };
+        if fallout.as_ref().is_some_and(|f| f.1) && self.ship_dormant {
+            return Err("Past a million, repealing Hegemony casts you out of the capital, and you have no ship to leave in.".into());
+        }
         let Some(c) = self.colony.as_mut() else { return Err("You have no colony.".into()) };
         let Some(i) = c.laws.iter().position(|e| e.law == l) else { return Err(format!("{} is not law.", l.name())) };
         let held = c.clock - c.laws[i].since;
@@ -1389,6 +1454,19 @@ impl Sim {
         }
         c.laws.remove(i);
         self.log.push(self.t, Level::Info, format!("Law repealed: {}.", l.name()));
+        let Some((freed, cast_out)) = fallout else { return Ok(()) };
+        for o in std::mem::take(&mut self.outposts) {
+            self.set_independent(&o, gal);
+            self.log.push(self.t, Level::Warn, format!("With Hegemony gone, {} declares independence ({:.0} people).", o.name, o.population()));
+        }
+        if !freed.is_empty() {
+            self.stats.colonies_abandoned += freed.len() as u32;
+        }
+        if cast_out {
+            let name = self.colony.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+            self.abandon_colony(gal)?;
+            self.log.push(self.t, Level::Critical, format!("{name} no longer needs a sovereign: the people send you away. You fly on as a roaming captain, without a colony."));
+        }
         Ok(())
     }
 
@@ -1418,20 +1496,29 @@ impl Sim {
     }
 
     /// Buy supplies from the merchants at the colony's space dock, into
-    /// the colony or (`to_ship`, when docked there) the ship's hold.
-    pub fn dock_buy(&mut self, g: Good, n: u32, to_ship: bool) {
+    /// the ship's hold (`to_ship`: refused, never redirected, unless the
+    /// ship is docked at this colony) or straight into the colony.
+    /// Returns the refusal, if any.
+    pub fn dock_buy(&mut self, g: Good, n: u32, to_ship: bool) -> Option<String> {
         let now = years(self.t);
-        let to_ship = to_ship && self.ship_at_colony();
+        if to_ship && !self.ship_at_colony() {
+            let ship = self.ship().name;
+            let (col, world) = self.colony.as_ref().map(|c| (c.name.clone(), c.world.clone())).unwrap_or_default();
+            let msg = format!("Nothing bought: the {ship} is not docked at {col} ({world}). Fly there to load its dock's goods, or choose Deliver to: Colony.");
+            self.log.push(self.t, Level::Warn, msg.clone());
+            return Some(msg);
+        }
         let fit = if to_ship { (self.cargo_room_t() / g.mass_t() + 1e-9).floor() as u32 } else { u32::MAX };
-        let Some(c) = self.colony.as_mut() else { return };
+        let Some(c) = self.colony.as_mut() else { return Some("You have no colony.".into()) };
         c.restock_dock(now);
         let Some(m) = c.market.as_mut() else {
             self.log.push(self.t, Level::Warn, "The colony has no space dock yet.");
-            return;
+            return Some("The colony has no space dock yet.".into());
         };
         let Some(price) = m.buy_price(g) else {
-            self.log.push(self.t, Level::Warn, format!("No merchant has {g} this year."));
-            return;
+            let msg = format!("No merchant has {g} this year.");
+            self.log.push(self.t, Level::Warn, msg.clone());
+            return Some(msg);
         };
         let stock = m.offers[&g].stock;
         let afford = (self.credits / price).floor() as u32;
@@ -1442,8 +1529,8 @@ impl Sim {
             } else {
                 format!("You cannot afford {g} ({price:.0} cr each).")
             };
-            self.log.push(self.t, Level::Warn, why);
-            return;
+            self.log.push(self.t, Level::Warn, why.clone());
+            return Some(why);
         }
         if let Some(o) = m.offers.get_mut(&g) {
             o.stock -= k;
@@ -1454,14 +1541,17 @@ impl Sim {
             self.hold.add(g, k);
             let ship = self.ship().name;
             self.log.push(self.t, Level::Good, format!("The dock loads {k} × {g} aboard the {ship} for {cost:.0} cr."));
-            return;
+            return None;
         }
         if g == Good::GeneKit {
-            c.gene_kit = c.gene_kit || c.hybrid;
+            c.gene_kits += k;
+            c.census.use_gene_kits(now, &mut c.gene_kits);
         } else {
             c.add_supply(g, k, now);
+            c.refresh_cover();
         }
-        self.log.push(self.t, Level::Good, format!("The dock delivers {k} × {g} for {cost:.0} cr."));
+        self.log.push(self.t, Level::Good, format!("The dock delivers {k} × {g} into {}'s stores for {cost:.0} cr.", c.name));
+        None
     }
 
     /// Sell tonnes of the colony's stockpile at the dock.
@@ -1699,12 +1789,19 @@ mod tests {
         assert!(stock > left + (usual - left) / 2, "restocked {left} -> {stock} of {usual}");
         assert!(c.materials < mat, "the plants used materials");
 
-        // Away from the colony, deliveries go to the colony.
+        // Away from the colony, buying for the ship is refused outright:
+        // nothing is bought, and nothing goes to the colony instead.
         sim.loc = Loc::Star;
         assert!(!sim.ship_at_colony());
-        let held = sim.hold.get(g);
-        sim.dock_buy(g, 1, true);
+        let (held, at_col, credits) = (sim.hold.get(g), sim.colony.as_ref().unwrap().units(g), sim.credits);
+        let err = sim.dock_buy(g, 1, true).expect("refused");
+        assert!(err.contains("not docked"), "{err}");
         assert_eq!(sim.hold.get(g), held);
+        assert_eq!(sim.colony.as_ref().unwrap().units(g), at_col, "not sent to the colony");
+        assert_eq!(sim.credits, credits, "nothing paid");
+        // Only an explicit choice delivers to the colony.
+        assert!(sim.dock_buy(g, 1, false).is_none());
+        assert_eq!(sim.colony.as_ref().unwrap().units(g), at_col + 1);
     }
 
     #[test]
@@ -1842,6 +1939,8 @@ mod tests {
             unseen: vec![],
             parents_unseen: false,
             line: true,
+            hybrid: false,
+            licensed: false,
         });
         assert_eq!(census.family_name(kid), "Vale");
     }
@@ -1857,9 +1956,9 @@ mod tests {
         sim.enact_law(Law::BeFruitful).unwrap();
         assert!(sim.colony.as_ref().unwrap().materials < 100.0);
         assert!(sim.enact_law(Law::FamilyPlanning).is_err(), "exclusive");
-        assert!(sim.repeal_law(Law::BeFruitful).is_err(), "too soon");
+        assert!(sim.repeal_law(Law::BeFruitful, &mut gal).is_err(), "too soon");
         run_years(&mut sim, &mut gal, 1.1);
-        sim.repeal_law(Law::BeFruitful).unwrap();
+        sim.repeal_law(Law::BeFruitful, &mut gal).unwrap();
         assert_eq!(sim.stats.laws_enacted, 1);
         // Fertility follows the law.
         let fert = |laws: &[Law]| {
@@ -2040,6 +2139,55 @@ mod hegemony_colony_tests {
         (sim, gal, other)
     }
 
+    /// A capital under Hegemony with one further colony founded by ark.
+    fn hegemony_with_outpost() -> (Sim, Galaxy) {
+        let (mut sim, mut gal, other) = setup();
+        sim.leave_colony().unwrap();
+        sim.credits = 1e6;
+        sim.colony.as_mut().unwrap().laws.push(law::Enacted { law: law::Law::Hegemony, since: -10.0 });
+        sim.loc = Loc::Planet(other);
+        sim.buy_ship(&gal, ARK, Purchase::TradeIn).unwrap();
+        sim.found_colony(&mut gal).unwrap();
+        assert_eq!(sim.outposts.len(), 1);
+        (sim, gal)
+    }
+
+    /// Repealing Hegemony frees every other colony; the captain keeps the
+    /// capital below a million.
+    #[test]
+    fn repealing_hegemony_frees_the_other_colonies() {
+        let (mut sim, mut gal) = hegemony_with_outpost();
+        let (freed, cast_out) = sim.hegemony_repeal_fallout().unwrap();
+        assert_eq!(freed.len(), 1);
+        assert!(!cast_out);
+        let (sys, loc) = (sim.outposts[0].sys_id, sim.outposts[0].loc);
+        sim.repeal_law(law::Law::Hegemony, &mut gal).unwrap();
+        assert!(sim.outposts.is_empty(), "set free");
+        assert!(gal.system(sys).site(loc).unwrap().colony.is_some(), "an independent colony on its world");
+        assert!(sim.colony.as_ref().is_some_and(|c| !c.outpost), "the capital is kept");
+        assert!(!sim.hegemony());
+    }
+
+    /// Past a million the capital casts the captain out too: they fly on
+    /// with the ship, without a colony. Without a ship, no repeal.
+    #[test]
+    fn repealing_hegemony_past_a_million_casts_the_captain_out() {
+        let (mut sim, mut gal) = hegemony_with_outpost();
+        sim.colony.as_mut().unwrap().census.cohorts[30][0] += WIN_POP;
+        assert!(sim.hegemony_repeal_fallout().unwrap().1);
+        sim.ship_dormant = true;
+        assert!(sim.repeal_law(law::Law::Hegemony, &mut gal).is_err(), "no ship to leave in");
+        assert!(sim.hegemony() && sim.outposts.len() == 1, "nothing changed");
+        sim.ship_dormant = false;
+        let (sys, loc) = { let c = sim.colony.as_ref().unwrap(); (c.sys_id, c.loc) };
+        sim.repeal_law(law::Law::Hegemony, &mut gal).unwrap();
+        assert!(sim.colony.is_none() && sim.outposts.is_empty(), "no colonies left");
+        assert!(!sim.in_colony);
+        assert!(gal.system(sys).site(loc).unwrap().colony.is_some(), "the capital goes on, independent");
+        // A roaming captain may found again.
+        assert!(sim.founding_plan(&gal).map_or_else(|e| !e.contains("already have a colony"), |_| true));
+    }
+
     fn royal(c: &mut PlayerColony, age: f64, father: Option<u32>, now: f64) -> u32 {
         c.census.add(Person {
             female: false,
@@ -2054,6 +2202,8 @@ mod hegemony_colony_tests {
             unseen: vec![],
             parents_unseen: false,
             line: true,
+            hybrid: false,
+            licensed: false,
         })
     }
 
@@ -2118,7 +2268,32 @@ mod hegemony_colony_tests {
         let plan = sim.founding_plan(&gal).unwrap();
         assert_eq!(plan.colonists, 500 + 9, "crew and passengers, not the captain");
         let captain = sim.player_name().to_string();
+        // Supplies in the ark's hold go to the new colony, not the capital.
+        sim.hold.add(Good::HydroKit, 3);
+        sim.hold.add(Good::MedKit, 7);
+        sim.hold.add(Good::HazardDome, 4);
+        let cap_hydro = sim.colony.as_ref().unwrap().units(Good::HydroKit);
         sim.found_colony(&mut gal).unwrap();
+        assert_eq!(sim.hold.get(Good::HydroKit) + sim.hold.get(Good::MedKit), 0, "hold unloaded");
+        assert_eq!(sim.outposts[0].units(Good::HydroKit), 3);
+        assert_eq!(sim.outposts[0].units(Good::MedKit), 7);
+        assert_eq!(sim.colony.as_ref().unwrap().units(Good::HydroKit), cap_hydro);
+        // Its screens show what was unloaded at once, not after a month.
+        let ind = &sim.outposts[0].ind;
+        assert!(ind.power_eff > 0.0 && ind.sheltered > 0.0 && ind.coverage[&Good::HydroKit] > 0.0, "{ind:?}");
+        // A captive and two kits unloaded there: one kit marries the
+        // captive to a settler at once, the other waits in store.
+        sim.swap_colony(1);
+        sim.hold.add(Good::Slaves, 1);
+        sim.hold.add(Good::GeneKit, 2);
+        let msg = sim.unload_to_colony();
+        let c = sim.colony.as_ref().unwrap();
+        assert!(c.outpost);
+        assert_eq!(c.gene_kits, 1, "{msg}");
+        let licensed: Vec<&Person> = c.census.living.iter().map(|&i| &c.census.people[i as usize]).filter(|p| p.licensed).collect();
+        assert_eq!(licensed.len(), 2);
+        assert!(licensed.iter().any(|p| p.alien) && licensed.iter().any(|p| !p.alien));
+        sim.swap_colony(1);
         assert_eq!(sim.outposts.len(), 1);
         assert!(!sim.in_colony, "the captain flies on");
         assert_eq!(sim.crew.names, vec![captain], "only the captain stays aboard");
@@ -2133,6 +2308,8 @@ mod hegemony_colony_tests {
         // Actions on the outpost go through the swap; it cannot be "entered".
         sim.swap_colony(1);
         assert!(sim.colony.as_ref().unwrap().outpost);
+        sim.colony.as_mut().unwrap().materials = 1e9;
+        assert!(sim.enact_law(law::Law::Hegemony).is_err(), "Hegemony only at the capital");
         assert!(sim.enter_colony().is_err());
         sim.swap_colony(1);
         assert!(!sim.colony.as_ref().unwrap().outpost, "capital restored");

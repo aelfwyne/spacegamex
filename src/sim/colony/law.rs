@@ -140,7 +140,7 @@ impl Law {
             Law::FreeEnterprise => "Happiness −0.03, health −0.02",
             Law::MartialLaw => "Happiness −0.15",
             Law::Emancipation => "Materials −10%",
-            Law::Hegemony => "Happiness −0.05, wealth −0.03",
+            Law::Hegemony => "Happiness −0.05, wealth −0.03. Repealing it frees every other colony, and past a million the capital sends you away",
         }
     }
 

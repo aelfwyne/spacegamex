@@ -64,9 +64,17 @@ pub struct Person {
     #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
     pub spouse: Option<u32>,
     /// A native species (captives and their children): cannot have children
-    /// with humans unless the colony is Hybrid.
+    /// with humans, except a couple licensed by a Genetic Modification Kit.
     #[serde(rename = "a", default, skip_serializing_if = "no")]
     pub alien: bool,
+    /// A child of a human and a native (or of hybrids): has children only
+    /// with other hybrids.
+    #[serde(rename = "h", default, skip_serializing_if = "no")]
+    pub hybrid: bool,
+    /// Married to a human (or native) under a Genetic Modification Kit:
+    /// the couple can have (hybrid) children.
+    #[serde(rename = "k", default, skip_serializing_if = "no")]
+    pub licensed: bool,
     #[serde(rename = "o")]
     pub origin: Origin,
     /// Pregnancy due date (game years).
@@ -93,6 +101,52 @@ impl Person {
         let end = self.died.map(|d| d as f64).unwrap_or(now);
         (end - self.born as f64).max(0.0)
     }
+
+    pub fn species(&self) -> Species {
+        if self.hybrid {
+            Species::Hybrid
+        } else if self.alien {
+            Species::Native
+        } else {
+            Species::Human
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Species {
+    Human,
+    Native,
+    Hybrid,
+}
+
+impl Species {
+    pub fn name(self) -> &'static str {
+        match self {
+            Species::Human => "Human",
+            Species::Native => "Native",
+            Species::Hybrid => "Hybrid",
+        }
+    }
+}
+
+/// A human and a native: they need a Genetic Modification Kit to have
+/// children together.
+pub fn mixed(a: &Person, b: &Person) -> bool {
+    !a.hybrid && !b.hybrid && a.alien != b.alien
+}
+
+/// Can this couple have children?
+pub fn fertile_pair(a: &Person, b: &Person) -> bool {
+    a.species() == b.species() || (mixed(a, b) && a.licensed && b.licensed)
+}
+
+/// (alien, hybrid) of a child of `mother` and `father`.
+fn child_species(mother: &Person, father: Option<&Person>) -> (bool, bool) {
+    match father {
+        Some(f) if mother.hybrid || f.hybrid || f.alien != mother.alien => (false, true),
+        _ => (mother.alien && !mother.hybrid, mother.hybrid),
+    }
 }
 
 /// Someone who left on a colony ark, as their new world will know them.
@@ -106,6 +160,8 @@ pub struct Emigrant {
     /// Of the captain's royal line.
     pub royal: bool,
     pub alien: bool,
+    #[serde(default)]
+    pub hybrid: bool,
 }
 
 /// Per-year rates the colony's conditions set for this step.
@@ -121,13 +177,11 @@ pub struct Rates {
     pub infant: f64,
     /// Chance a birth kills the mother.
     pub maternal: f64,
-    /// Humans and natives can have children together.
-    pub hybrid: bool,
 }
 
 impl Default for Rates {
     fn default() -> Self {
-        Rates { mort_mult: 1.0, hazard: 0.002, fert: 0.2, infant: 0.01, maternal: 0.001, hybrid: false }
+        Rates { mort_mult: 1.0, hazard: 0.002, fert: 0.2, infant: 0.01, maternal: 0.001 }
     }
 }
 
@@ -248,7 +302,7 @@ impl Census {
                 return;
             }
             let p = c.people[id as usize].clone();
-            out.push(Emigrant { female: p.female, born: p.born, given: c.given_name(id), family: c.family_name(id), royal: p.line, alien: p.alien });
+            out.push(Emigrant { female: p.female, born: p.born, given: c.given_name(id), family: c.family_name(id), royal: p.line, alien: p.alien, hybrid: p.hybrid });
             c.emigrated.insert(id, now as f32);
             c.living.retain(|&i| i != id);
         };
@@ -289,6 +343,7 @@ impl Census {
                 family: crate::rngx::name(&mut nr),
                 royal: false,
                 alien: false,
+                hybrid: false,
             });
         }
         // A small colony is all records: take adults at random (not of the
@@ -331,8 +386,9 @@ impl Census {
         self.living.len() as f64 + self.cohort_total()
     }
 
-    pub fn aliens(&self) -> usize {
-        self.living.iter().filter(|&&i| self.people[i as usize].alien).count()
+    /// Living records of `sp` (natives and hybrids are always records).
+    pub fn count_species(&self, sp: Species) -> usize {
+        self.living.iter().filter(|&&i| self.people[i as usize].species() == sp).count()
     }
 
     /// Living people of working age (16–65).
@@ -503,6 +559,8 @@ impl Census {
             unseen: vec![],
             parents_unseen: born as f32 >= self.founded + 1.0,
             line: false,
+            hybrid: false,
+            licensed: false,
         })
     }
 
@@ -540,6 +598,8 @@ impl Census {
                 unseen: vec![],
                 parents_unseen: false,
                 line,
+                hybrid: false,
+                licensed: false,
             });
         }
     }
@@ -570,6 +630,8 @@ impl Census {
             unseen: vec![],
             parents_unseen: born as f32 >= self.founded + 1.0,
             line: false,
+            hybrid: false,
+            licensed: false,
         });
         if with_partner && age >= 20 && (with_children || rng.random_bool(0.8)) {
             // A partner of about the same age.
@@ -721,7 +783,7 @@ impl Census {
                 && due as f64 <= now
             {
                 let father = p.spouse;
-                let alien = p.alien;
+                let (alien, hybrid) = child_species(p, father.map(|f| &self.people[f as usize]));
                 let p_line = p.line;
                 self.people[id as usize].due = None;
                 let line = p_line || father.is_some_and(|f| self.people[f as usize].line) || Some(id) == player || father == player;
@@ -730,7 +792,7 @@ impl Census {
                 if infant_dies {
                     self.this_year.infant_deaths += 1.0;
                 }
-                if !self.demographic || line || alien {
+                if !self.demographic || line || alien || hybrid {
                     let female = self.sex_roll();
                     let died = infant_dies.then(|| (now + rng.random_range(0.0..0.9)) as f32);
                     if died.is_some() {
@@ -749,6 +811,8 @@ impl Census {
                         unseen: vec![],
                         parents_unseen: false,
                         line,
+                        hybrid,
+                        licensed: false,
                     });
                 } else if !infant_dies {
                     let s = self.sex_roll() as usize;
@@ -773,7 +837,7 @@ impl Census {
             if partner.died.is_some() {
                 continue;
             }
-            if partner.alien != p.alien && !r.hybrid {
+            if !fertile_pair(p, partner) {
                 continue;
             }
             let theirs = Some(id) == player || Some(sp) == player;
@@ -811,7 +875,7 @@ impl Census {
         }
         if self.demographic {
             self.step_cohorts(dt, r);
-        } else if self.living.iter().filter(|&&i| !self.people[i as usize].alien).count() > DETAIL_LIMIT {
+        } else if self.living.iter().filter(|&&i| self.people[i as usize].species() == Species::Human).count() > DETAIL_LIMIT {
             self.demographic = true;
         }
     }
@@ -859,9 +923,10 @@ impl Census {
         self.this_year.death_age_sum += maternal * 30.0;
     }
 
-    /// Once a year: everyone in the bulk gets a year older, and singles
-    /// pair up.
-    pub fn yearly(&mut self, now: f64, hybrid: bool) {
+    /// Once a year: everyone in the bulk gets a year older, singles pair
+    /// up, and Genetic Modification Kits (`kits`, used up) license human
+    /// and native couples.
+    pub fn yearly(&mut self, now: f64, kits: &mut u32) {
         if self.demographic {
             let last = self.cohorts[MAX_AGE];
             self.this_year.deaths += last[0] + last[1];
@@ -870,7 +935,8 @@ impl Census {
             }
             self.cohorts[0] = [0.0; 2];
         }
-        self.pair_up(now, hybrid);
+        self.use_gene_kits(now, kits);
+        self.pair_up(now);
         self.last_year = std::mem::take(&mut self.this_year);
     }
 
@@ -887,7 +953,73 @@ impl Census {
             || (pa.father.is_some() && pa.father == pb.father)
     }
 
-    fn pair_up(&mut self, now: f64, hybrid: bool) {
+    /// Each kit lets one human and one native have children together:
+    /// first couples already married across the line (the captain's own
+    /// first), then single natives, each married to a single human.
+    pub fn use_gene_kits(&mut self, now: f64, kits: &mut u32) {
+        if *kits == 0 {
+            return;
+        }
+        let mut couples: Vec<(u32, u32)> = self
+            .living
+            .iter()
+            .filter_map(|&i| {
+                let p = &self.people[i as usize];
+                let sp = p.spouse?;
+                let q = &self.people[sp as usize];
+                (p.female && q.alive() && mixed(p, q) && !(p.licensed && q.licensed)).then_some((i, sp))
+            })
+            .collect();
+        couples.sort_by_key(|&(a, b)| !(self.people[a as usize].line || self.people[b as usize].line));
+        for (a, b) in couples {
+            if *kits == 0 {
+                return;
+            }
+            *kits -= 1;
+            self.people[a as usize].licensed = true;
+            self.people[b as usize].licensed = true;
+        }
+        let single = |p: &Person, people: &[Person]| {
+            let age = p.age(now);
+            (ADULT..60.0).contains(&age) && p.spouse.is_none_or(|s| people[s as usize].died.is_some())
+        };
+        let natives: Vec<u32> = self.living.iter().copied().filter(|&i| {
+            let p = &self.people[i as usize];
+            p.species() == Species::Native && single(p, &self.people)
+        }).collect();
+        for n in natives {
+            if *kits == 0 {
+                return;
+            }
+            let (female, born) = (self.people[n as usize].female, self.people[n as usize].born);
+            // A single human of about the same age: a record, else someone
+            // drawn from the anonymous bulk.
+            let found = self
+                .living
+                .iter()
+                .copied()
+                .filter(|&h| {
+                    let q = &self.people[h as usize];
+                    q.species() == Species::Human && q.female != female && single(q, &self.people) && (q.born - born).abs() <= 15.0
+                })
+                .min_by(|&a, &b| (self.people[a as usize].born - born).abs().total_cmp(&(self.people[b as usize].born - born).abs()));
+            let age = (now - born as f64).max(0.0) as i64;
+            let human = found.or_else(|| {
+                [0i64, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5]
+                    .iter()
+                    .map(|d| (age + d).clamp(ADULT as i64, 59) as usize)
+                    .find_map(|a| self.materialize_inner(a, !female, now, false, false))
+            });
+            let Some(h) = human else { continue };
+            *kits -= 1;
+            for (x, y) in [(n, h), (h, n)] {
+                self.people[x as usize].spouse = Some(y);
+                self.people[x as usize].licensed = true;
+            }
+        }
+    }
+
+    fn pair_up(&mut self, now: f64) {
         let single = |p: &Person, id: u32, people: &Vec<Person>| {
             let _ = id;
             p.age(now) >= ADULT && p.age(now) < 60.0 && p.spouse.is_none_or(|s| people[s as usize].died.is_some())
@@ -920,7 +1052,7 @@ impl Census {
                     continue;
                 }
                 let wp = &self.people[w as usize];
-                if wp.alien != mp.alien && !hybrid {
+                if wp.species() != mp.species() {
                     continue;
                 }
                 let gap = (wp.born - mp.born).abs();
@@ -947,6 +1079,8 @@ impl Census {
                 let w = women[wi];
                 self.people[m as usize].spouse = Some(w);
                 self.people[w as usize].spouse = Some(m);
+                self.people[m as usize].licensed = false;
+                self.people[w as usize].licensed = false;
             }
         }
     }
@@ -985,9 +1119,11 @@ mod tests {
                 unseen: vec![],
                 parents_unseen: false,
                 line: false,
+                hybrid: false,
+                licensed: false,
             });
         }
-        c.pair_up(0.0, false);
+        c.pair_up(0.0);
         c
     }
 
@@ -1000,7 +1136,7 @@ mod tests {
                 let now = y as f64 + m as f64 / 12.0;
                 c.step(now, 1.0 / 12.0, r, None, true, &mut ev);
             }
-            c.yearly(y as f64 + 1.0, false);
+            c.yearly(y as f64 + 1.0, &mut 0);
             c.draws_year += 1;
         }
     }
@@ -1017,10 +1153,79 @@ mod tests {
         assert!(!founders_dead.is_empty());
     }
 
+    /// Each Genetic Modification Kit marries one native to one human; their
+    /// children are Hybrids, who marry only Hybrids. Without kits natives
+    /// and humans never have children together.
+    #[test]
+    fn gene_kits_make_hybrid_couples_one_per_kit() {
+        let mut c = Census::new(5, 0.0);
+        for i in 0..40 {
+            c.add(Person {
+                female: i % 2 == 1,
+                born: -(20.0 + (i % 10) as f32),
+                died: None,
+                mother: None,
+                father: None,
+                spouse: None,
+                alien: i >= 20,
+                origin: if i >= 20 { Origin::Captive } else { Origin::Founder },
+                due: None,
+                unseen: vec![],
+                parents_unseen: false,
+                line: false,
+                hybrid: false,
+                licensed: false,
+            });
+        }
+        let r = Rates { fert: 0.5, ..Rates::default() };
+        let mut ev = Vec::new();
+        // No kits: two peoples, nobody mixed.
+        c.yearly(0.0, &mut 0);
+        for &i in &c.living {
+            let p = &c.people[i as usize];
+            if let Some(s) = p.spouse {
+                assert_eq!(p.alien, c.people[s as usize].alien, "no mixed marriage without a kit");
+            }
+        }
+        // Widow everyone, then three kits: three mixed couples.
+        for i in 0..40 {
+            c.people[i].spouse = None;
+        }
+        let mut kits = 3;
+        c.yearly(0.0, &mut kits);
+        assert_eq!(kits, 0, "kits used up");
+        let mixed_couples = c.living.iter().filter(|&&i| {
+            let p = &c.people[i as usize];
+            p.female && p.spouse.is_some_and(|s| mixed(p, &c.people[s as usize]))
+        });
+        assert_eq!(mixed_couples.count(), 3, "one couple per kit");
+        // Their children are Hybrids; nobody else's.
+        for y in 0..6 {
+            for m in 0..12 {
+                c.step(y as f64 + m as f64 / 12.0, 1.0 / 12.0, &r, None, true, &mut ev);
+            }
+            c.yearly(y as f64 + 1.0, &mut 0);
+        }
+        let born: Vec<&Person> = c.people.iter().filter(|p| p.origin == Origin::Born).collect();
+        let hybrids: Vec<&Person> = born.iter().copied().filter(|p| p.hybrid).collect();
+        assert!(!hybrids.is_empty(), "the licensed couples have children");
+        for h in &hybrids {
+            let (m, f) = (&c.people[h.mother.unwrap() as usize], &c.people[h.father.unwrap() as usize]);
+            assert!(mixed(m, f) && m.licensed && f.licensed);
+            assert!(!h.alien);
+        }
+        assert!(born.iter().any(|p| !p.hybrid && p.alien) && born.iter().any(|p| !p.hybrid && !p.alien));
+        // Hybrids marry only Hybrids.
+        let h = Person { hybrid: true, ..c.people[0].clone() };
+        assert!(!fertile_pair(&h, &c.people[1]) && !fertile_pair(&h, &c.people[21]));
+        assert!(fertile_pair(&h, &Person { female: true, ..h.clone() }));
+        assert_eq!(c.count_species(Species::Hybrid), hybrids.iter().filter(|p| p.alive()).count());
+    }
+
     #[test]
     fn bad_conditions_shrink_a_colony() {
         let mut c = founders(200, 3);
-        let r = Rates { mort_mult: 6.0, hazard: 0.05, fert: 0.03, infant: 0.3, maternal: 0.03, hybrid: false };
+        let r = Rates { mort_mult: 6.0, hazard: 0.05, fert: 0.03, infant: 0.3, maternal: 0.03 };
         run(&mut c, 40, &r);
         assert!(c.population() < 200.0);
     }

@@ -255,7 +255,8 @@ pub struct App {
     pub colony_tab: ColonyTab,
     /// The colony the colony screen shows and acts on (0 = the capital).
     pub sel_colony: usize,
-    /// Space-dock purchases go into the ship's hold instead of the colony.
+    /// Space-dock purchases go into the ship's hold (the default; refused
+    /// unless the ship is docked there), not straight into the colony.
     pub dock_to_ship: bool,
     /// The colonist shown in the family view.
     pub person: Option<u32>,
@@ -263,6 +264,9 @@ pub struct App {
     last_colony_save: f64,
     /// Founding asks twice.
     pub confirm_found: bool,
+    /// Repealing Hegemony at the capital was pressed once (it frees the
+    /// other colonies, and past a million casts the captain out).
+    pub confirm_repeal: bool,
     /// Retiring asks twice.
     pub confirm_retire: bool,
     /// The captain popup is open (title).
@@ -307,10 +311,11 @@ impl App {
             title_sex: Sex::Male,
             colony_tab: ColonyTab::Overview,
             sel_colony: 0,
-            dock_to_ship: false,
+            dock_to_ship: true,
             person: None,
             last_colony_save: 0.0,
             confirm_found: false,
+            confirm_repeal: false,
             confirm_retire: false,
             captain_open: false,
             title_background: Default::default(),
@@ -962,7 +967,9 @@ impl App {
             Action::DockBuy(g) => {
                 let n = self.cargo_qty;
                 let to_ship = self.dock_to_ship;
-                self.with_sim(|s| s.dock_buy(g, n, to_ship));
+                if let Some(err) = self.sim.as_mut().and_then(|s| s.dock_buy(g, n, to_ship)) {
+                    self.flash(err);
+                }
             }
             Action::DockToShip(b) => self.dock_to_ship = b,
             Action::DockSellMaterials(t) => self.with_sim(|s| s.dock_sell_materials(t)),
@@ -1073,9 +1080,21 @@ impl App {
                 }
             }
             Action::RepealLaw(l) => {
-                if let Err(e) = self.sim.as_mut().unwrap().repeal_law(l) {
-                    self.flash(e);
+                let fallout = self.sim.as_ref().and_then(|s| s.hegemony_repeal_fallout()).filter(|_| l == Law::Hegemony);
+                if fallout.is_some() && !self.confirm_repeal {
+                    self.confirm_repeal = true;
+                    self.flash("Repealing Hegemony cannot be undone: read the warning, then press Confirm repeal.");
+                    return;
                 }
+                self.confirm_repeal = false;
+                let had_colony = self.sim().colony.is_some();
+                if let Err(e) = self.sim.as_mut().unwrap().repeal_law(l, &mut self.gal) {
+                    self.flash(e);
+                } else if had_colony && self.sim().colony.is_none() {
+                    self.screen = Screen::Cockpit;
+                    self.person = None;
+                }
+                self.sel_colony = self.sel_colony.min(self.sim().outposts.len());
             }
             Action::Retire => {
                 if !self.confirm_retire {

@@ -145,6 +145,20 @@ impl Sim {
         gal.system_ref(self.sys_id).civ.as_ref().map(|c| c.tier).filter(|t| *t >= CivTier::T2)
     }
 
+    /// Where a partner can be sought here: (cost, chance, at a port). Any
+    /// port, or a pre-space native people (few of whom will leave with a
+    /// stranger from the sky).
+    pub fn partner_search(&self, gal: &Galaxy) -> Option<(f64, f64, bool)> {
+        let civ = gal.system_ref(self.sys_id).civ.as_ref()?;
+        let (cost, chance, port) = match civ.tier {
+            CivTier::T3 => (recruit_cost(CivTier::T3), 0.5, true),
+            CivTier::T2 => (recruit_cost(CivTier::T2), 0.3, true),
+            CivTier::T1 if civ.kind == CivKind::Natives => (recruit_cost(CivTier::T2), 0.1, false),
+            CivTier::T1 => return None,
+        };
+        Some((cost * self.background.recruit_cost_mult(), (chance + self.background.recruit_chance_bonus()).min(1.0), port))
+    }
+
     /// Search the port for a partner of the opposite sex to the captain.
     /// Costs credits and an hour, and may fail. Returns true on success.
     pub fn recruit_partner(&mut self, gal: &mut Galaxy) -> bool {
@@ -152,11 +166,10 @@ impl Sim {
             self.log.push(self.t, Level::Info, "You already have a partner aboard.");
             return false;
         }
-        let Some(tier) = self.port_tier(gal) else {
-            self.log.push(self.t, Level::Warn, "Recruiting needs a planetary or interstellar civilisation.");
+        let Some((cost, chance, _)) = self.partner_search(gal) else {
+            self.log.push(self.t, Level::Warn, "Recruiting needs a port, or a native people (even pre-space).");
             return false;
         };
-        let cost = recruit_cost(tier) * self.background.recruit_cost_mult();
         if self.credits < cost {
             self.log.push(self.t, Level::Warn, format!("A search costs {cost:.0} cr. You cannot afford it."));
             return false;
@@ -164,7 +177,6 @@ impl Sim {
         self.credits -= cost;
         self.rng_step += 1;
         let mut rng = derive(self.seed ^ self.rng_step.rotate_left(29), 0x5e_a7c4);
-        let chance = (if tier == CivTier::T3 { 0.5 } else { 0.3 } + self.background.recruit_chance_bonus()).min(1.0);
         // The search takes an hour of ship time.
         self.advance(1.0, gal);
         let civ = gal.system_ref(self.sys_id).civ.clone();
@@ -182,7 +194,7 @@ impl Sim {
         self.log.push(self.t, Level::Good, format!("{what} ({}) joins you as your partner.", who.sex.name().to_lowercase()));
         self.stats.partners += 1;
         if who.species.is_some() {
-            self.log.push(self.t, Level::Info, "A human-native couple needs a Genetic Modification Kit to have children. A colony you found together will be Hybrid.");
+            self.log.push(self.t, Level::Info, "A human-native couple needs a Genetic Modification Kit to have children. Your children will be Hybrids, who have children only with other Hybrids.");
         }
         self.crew.names.push(who.name.clone());
         self.crew.count += 1;
@@ -285,6 +297,28 @@ mod tests {
             assert_eq!(sim.crew.count, 2);
             assert!(sim.crew_bonus() > 1.0);
         }
+    }
+
+    /// Pre-space natives can be courted (at 1 in 10), and their partner is
+    /// native; a pre-space human colony has nobody to recruit.
+    #[test]
+    fn pre_space_natives_can_be_recruited_from_at_long_odds() {
+        let mut gal = Galaxy::new(42);
+        let mut sim = Sim::new_game(42, 0, &mut gal);
+        let id = sim.sys_id;
+        port(&mut gal, id, CivTier::T1, CivKind::Colony);
+        assert!(sim.partner_search(&gal).is_none());
+        port(&mut gal, id, CivTier::T1, CivKind::Natives);
+        let (_, chance, at_port) = sim.partner_search(&gal).unwrap();
+        assert!(!at_port && chance < 0.3);
+        sim.credits = 1e7;
+        let mut tries = 0;
+        while sim.spouse.is_none() && tries < 200 {
+            sim.recruit_partner(&mut gal);
+            tries += 1;
+        }
+        assert!(tries > 1, "long odds");
+        assert!(sim.spouse.as_ref().expect("a partner within 200 tries").species.is_some());
     }
 
     #[test]

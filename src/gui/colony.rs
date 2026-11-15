@@ -5,7 +5,7 @@ use super::paint;
 use super::theme::*;
 use super::View;
 use crate::game::{Action, App, ColonyTab};
-use crate::sim::colony::census::Origin;
+use crate::sim::colony::census::{Origin, Species};
 use crate::sim::colony::{Hab, PlayerColony, Project, WIN_POP};
 use crate::sim::people::years;
 use crate::sim::{fmt_date, Good, Sim};
@@ -216,7 +216,7 @@ pub fn panel(ui: &mut Ui, app: &App, acts: &mut Vec<Action>) {
     ui.separator();
     match app.colony_tab {
         ColonyTab::Overview => overview(ui, app, sim, col, acts),
-        ColonyTab::Laws => laws(ui, col, acts),
+        ColonyTab::Laws => laws(ui, app, sim, col, acts),
         ColonyTab::Supplies => supplies(ui, sim, col, acts),
         ColonyTab::Build => build(ui, col, acts),
         ColonyTab::Census => census(ui, sim, col, acts),
@@ -458,7 +458,7 @@ fn overview(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Ve
     super::panels::retire_button(ui, app, acts);
 }
 
-fn laws(ui: &mut Ui, col: &PlayerColony, acts: &mut Vec<Action>) {
+fn laws(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) {
     use crate::sim::colony::law::{self, Law};
     let cost = Law::cost_t(col.population());
     ui.horizontal_wrapped(|ui| {
@@ -471,6 +471,11 @@ fn laws(ui: &mut Ui, col: &PlayerColony, acts: &mut Vec<Action>) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for l in Law::ALL {
             let enacted = col.laws.iter().find(|e| e.law == l);
+            // Hegemony rules from the capital only (still shown where it
+            // was enacted, so it can be repealed).
+            if l == Law::Hegemony && col.outpost && enacted.is_none() {
+                continue;
+            }
             let blocked = l.conflicts().filter(|x| col.laws.iter().any(|e| e.law == *x));
             card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -482,7 +487,13 @@ fn laws(ui: &mut Ui, col: &PlayerColony, acts: &mut Vec<Action>) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match enacted {
                         Some(e) => {
                             let left = law::MIN_TERM_Y - (col.clock - e.since);
-                            let b = ui.add_enabled(left <= 0.0, egui::Button::new("Repeal"));
+                            let grave = l == Law::Hegemony && !col.outpost;
+                            let label = if grave && app.confirm_repeal {
+                                RichText::new("Confirm repeal").color(BAD).strong()
+                            } else {
+                                RichText::new("Repeal")
+                            };
+                            let b = ui.add_enabled(left <= 0.0, egui::Button::new(label));
                             if b.on_disabled_hover_text(format!("Can be repealed in {:.0} months.", (left * 12.0).ceil())).clicked() {
                                 acts.push(Action::RepealLaw(l));
                             }
@@ -502,10 +513,43 @@ fn laws(ui: &mut Ui, col: &PlayerColony, acts: &mut Vec<Action>) {
                 ui.label(dim(l.blurb()));
                 ui.label(RichText::new(format!("+ {}", l.pros())).color(GOOD));
                 ui.label(RichText::new(format!("− {}", l.cons())).color(BAD));
+                if l == Law::Hegemony && enacted.is_some() && !col.outpost {
+                    hegemony_repeal_warning(ui, sim, col);
+                }
             });
             ui.add_space(3.0);
         }
     });
+}
+
+/// What repealing Hegemony at the capital would cost, spelled out.
+fn hegemony_repeal_warning(ui: &mut Ui, sim: &Sim, col: &PlayerColony) {
+    let freed: Vec<&str> = sim.outposts.iter().map(|o| o.name.as_str()).collect();
+    let cast_out = col.population() >= WIN_POP;
+    ui.add_space(4.0);
+    ui.label(RichText::new("⚠ REPEALING HEGEMONY CANNOT BE UNDONE").color(BAD).strong().size(15.0));
+    if freed.is_empty() {
+        ui.label(RichText::new("You have no other colonies to lose, but you can found no more.").color(WARN));
+    } else {
+        ui.label(RichText::new(format!("Every other colony declares independence and is lost to you: {}.", freed.join(", "))).color(BAD));
+    }
+    if cast_out {
+        let fleet = if sim.fleet.is_empty() { String::new() } else { format!(" The {} ship(s) laid up here stay behind.", sim.fleet.len()) };
+        ui.label(
+            RichText::new(format!(
+                "{} is past a million: it no longer needs a sovereign. You are cast out, and it goes on as an independent colony. You fly on with the {} as a roaming captain, without a colony.{fleet}",
+                col.name,
+                sim.ship().name
+            ))
+            .color(BAD)
+            .strong(),
+        );
+        if sim.ship_dormant {
+            ui.label(RichText::new("You have no ship to leave in: Hegemony cannot be repealed.").color(WARN));
+        }
+    } else {
+        ui.label(dim(format!("You keep {} (a million people would send you away).", col.name)));
+    }
 }
 
 fn warnings(col: &PlayerColony) -> Vec<String> {
@@ -526,8 +570,8 @@ fn warnings(col: &PlayerColony) -> Vec<String> {
     if col.ind.shortage {
         w.push("Raw materials have run out: construction and the economy stall.".into());
     }
-    if col.hybrid && !col.gene_kit {
-        w.push("A Genetic Modification Kit is needed before humans and natives can have children.".into());
+    if col.hybrid && col.gene_kits == 0 && col.census.get(col.player).is_some_and(|p| p.spouse.is_some() && !p.licensed) {
+        w.push("A Genetic Modification Kit is needed before you and your native partner can have children.".into());
     }
     w
 }
@@ -576,6 +620,18 @@ fn supplies(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) 
             ui.label(dim(next.map(|y| format!("in {:.0} y", (y - now).max(0.0))).unwrap_or_else(|| "—".into())));
             ui.end_row();
         }
+        // Genetic Modification Kits: a stock, not a coverage.
+        let couples = col.census.living.iter().filter(|&&i| {
+            let p = &col.census.people[i as usize];
+            p.female && p.licensed
+        }).count();
+        ui.label(RichText::new(Good::GeneKit.name()).color(ACCENT)).on_hover_text(
+            "Each kit lets one human and one native have children together; their children are Hybrids. Kits are used as soon as there is a single native and a single human to marry (checked on delivery and every year), or a married human and native without one.",
+        );
+        ui.label(format!("{} in store", col.gene_kits));
+        ui.label(dim(format!("{couples} licensed couple{}", if couples == 1 { "" } else { "s" })));
+        ui.label(dim("—"));
+        ui.end_row();
     });
     if col.ind.forage >= 0.01 {
         ui.label(dim(format!("Without hydroponics, hunting, gathering and farming can feed {:.0}% of the colony, at the cost of hard labour.", col.ind.forage * 100.0)));
@@ -590,13 +646,10 @@ fn supplies(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) 
     if !boons.is_empty() {
         ui.label(dim(format!("Gifts from artifact deliveries: {}.", boons.join(", "))));
     }
-    if col.hybrid {
-        ui.label(if col.gene_kit { dim("Genetic Modification Kit: installed.") } else { RichText::new("Genetic Modification Kit: missing.").color(WARN) });
-    }
     ui.add_space(6.0);
     section(ui, "FROM THE SHIP");
     let docked = sim.sys_id == col.sys_id && sim.loc == col.loc && sim.trip.is_none() && sim.shuttle.is_none() && !sim.ship_dormant;
-    let has = sim.hold.units.keys().any(|g| g.is_supply() || *g == Good::Slaves);
+    let has = sim.hold.units.keys().any(|g| g.is_supply() || *g == Good::Slaves || *g == Good::GeneKit);
     super::panels::cargo_hold(ui, sim);
     if ui
         .add_enabled(docked, egui::Button::new("Unload supplies, captives and spare raw materials"))
@@ -674,6 +727,7 @@ fn census(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) {
         }
     });
     let captives = c.living.iter().filter(|&&i| c.people[i as usize].origin == Origin::Captive).count();
+    let (natives, hybrids) = (c.count_species(Species::Native), c.count_species(Species::Hybrid));
     egui::Grid::new("census_tot").num_columns(2).spacing([14.0, 2.0]).show(ui, |ui| {
         ui.label(dim("Colonists"));
         ui.label(fmt_pop(pop));
@@ -681,9 +735,29 @@ fn census(ui: &mut Ui, sim: &Sim, col: &PlayerColony, acts: &mut Vec<Action>) {
         ui.label(dim("Individual records"));
         ui.label(format!("{} living · {} ever", fmt_pop(c.living.len() as f64), fmt_pop(c.people.len() as f64)));
         ui.end_row();
-        if captives > 0 {
-            ui.label(dim("Captives"));
-            ui.label(RichText::new(format!("{captives}")).color(WARN));
+        // Captives are natives brought in as slaves; their children are
+        // natives born free. One line, with the captives called out.
+        if natives > 0 || captives > 0 {
+            ui.label(dim("Natives")).on_hover_text("A native species. Captives are those bought as slaves: only they weigh on the colony's happiness and health. Their children are born free.");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.label(format!("{natives} ({:.1}%)", natives as f64 / pop.max(1.0) * 100.0));
+                if captives > 0 {
+                    ui.label(", ");
+                    let text = match (captives == natives, captives) {
+                        (true, 1) => "a captive".to_string(),
+                        (true, _) => "all captives".to_string(),
+                        (false, 1) => "1 captive".to_string(),
+                        (false, k) => format!("{k} captives"),
+                    };
+                    ui.label(RichText::new(text).color(WARN));
+                }
+            });
+            ui.end_row();
+        }
+        if hybrids > 0 {
+            ui.label(dim("Hybrids"));
+            ui.label(format!("{hybrids} ({:.1}%)", hybrids as f64 / pop.max(1.0) * 100.0));
             ui.end_row();
         }
         ui.label(dim("Women of child-bearing age"));
@@ -770,7 +844,8 @@ fn family(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Vec<
         Origin::Captive => "A captive",
         Origin::Settler => "Colonist",
     };
-    ui.label(dim(format!("{origin}{}", if p.alien { " · native species" } else { "" })));
+    let licensed = if p.licensed { " · may have children with a native or human partner (Genetic Modification Kit)" } else { "" };
+    ui.label(dim(format!("{origin} · {}{licensed}", p.species().name())));
     if p.due.is_some() {
         ui.label(RichText::new("Expecting a child.").color(GOOD));
     }
@@ -836,7 +911,7 @@ fn market(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Vec<
     }
     // Docked at the colony shown (the GUI does not swap it in).
     let docked = !sim.ship_dormant && sim.trip.is_none() && sim.shuttle.is_none() && sim.sys_id == col.sys_id && sim.loc == col.loc;
-    let to_ship = app.dock_to_ship && docked;
+    let to_ship = app.dock_to_ship;
     ui.horizontal(|ui| {
         ui.label("Deliver to:");
         if ui.selectable_label(!to_ship, "Colony").on_hover_text("Supplies go straight into the colony's stores.").clicked() {
@@ -844,15 +919,26 @@ fn market(ui: &mut Ui, app: &App, sim: &Sim, col: &PlayerColony, acts: &mut Vec<
         }
         let ship = sim.ship().name;
         let r = ui
-            .add_enabled(docked, egui::Button::selectable(to_ship, format!("{ship} hold")))
-            .on_hover_text("Load supplies into the ship's cargo hold, to carry them to another world.")
-            .on_disabled_hover_text(format!("Dock the ship at {} to load it here.", col.world));
+            .add(egui::Button::selectable(to_ship, format!("{ship} hold")))
+            .on_hover_text("Load supplies into the ship's cargo hold, to carry them to another world.");
         if r.clicked() {
             acts.push(Action::DockToShip(true));
         }
     });
-    if to_ship {
+    if to_ship && docked {
         ui.label(dim(format!("Hold: {:.0} / {:.0} t", sim.hold.mass_t(), sim.ship().cargo_t)));
+    } else if to_ship {
+        ui.label(
+            RichText::new(format!(
+                "The {ship} is not docked at {} ({}): nothing can be bought for its hold here. Fly to {} first, or choose Colony.",
+                col.name,
+                col.world,
+                col.world,
+                ship = sim.ship().name
+            ))
+            .color(WARN)
+            .strong(),
+        );
     }
     let Some(m) = &col.market else { return };
     egui::Grid::new("dock_mkt").num_columns(4).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
